@@ -19,6 +19,7 @@ import json
 import os
 import random
 import sys
+import time
 from dataclasses import dataclass, field
 from datetime import date
 from enum import Enum
@@ -1558,7 +1559,7 @@ def run_interactive(seed=None):
                     else:
                         print(f"  {DIM}Cancelled.{RESET}")
  
-                        elif choice == "i":
+            elif choice == "i":
                 render_how_to_play()
                 render_full_state(gs)
  
