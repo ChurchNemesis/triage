@@ -2250,4 +2250,11 @@ Examples:
  
  
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        print(f"\n{RED}{BOLD}ERROR: {e}{RESET}")
+        import traceback
+        traceback.print_exc()
+        input("Press Enter to close...")
+
