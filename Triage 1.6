@@ -1204,17 +1204,21 @@ def render_difficulty_selection():
     """Show difficulty selection screen after New Game is selected."""
     clear_screen()
     print()
-    print(f"{BOLD}{CYAN}  ╔═══════════════════════════════════════════════╗{RESET}")
-    print(f"{BOLD}{CYAN}  ║{RESET}                                               {BOLD}{CYAN}║{RESET}")
-    print(f"{BOLD}{CYAN}  ║{RESET}   {RED}{BOLD} _____  ____   ___    _     ____  ____{RESET}      {BOLD}{CYAN}║{RESET}")
-    print(f"{BOLD}{CYAN}  ║{RESET}   {RED}{BOLD}|_   _||  _ \\ |_ _|  / \\   / ___||  __|{RESET}     {BOLD}{CYAN}║{RESET}")
-    print(f"{BOLD}{CYAN}  ║{RESET}   {RED}{BOLD}  | |  | |_) | | |  / _ \\ | |  _ | |_{RESET}       {BOLD}{CYAN}║{RESET}")
-    print(f"{BOLD}{CYAN}  ║{RESET}   {RED}{BOLD}  | |  |  _ <  | | / ___ \\| |_| ||  _|{RESET}      {BOLD}{CYAN}║{RESET}")
-    print(f"{BOLD}{CYAN}  ║{RESET}   {RED}{BOLD}  |_|  |_| \\_\\|___/_/   \\_\\\\____||____|{RESET}     {BOLD}{CYAN}║{RESET}")
-    print(f"{BOLD}{CYAN}  ║{RESET}                                               {BOLD}{CYAN}║{RESET}")
-    print(f"{BOLD}{CYAN}  ║{RESET}          {BOLD}T H E   B O A R D   G A M E{RESET}          {BOLD}{CYAN}║{RESET}")
-    print(f"{BOLD}{CYAN}  ║{RESET}                                               {BOLD}{CYAN}║{RESET}")
-    print(f"{BOLD}{CYAN}  ╚═══════════════════════════════════════════════╝{RESET}")
+    lines = [
+        f"{BOLD}{CYAN}╔═══════════════════════════════════════════════╗{RESET}",
+        f"{BOLD}{CYAN}║{RESET}                                               {BOLD}{CYAN}║{RESET}",
+        f"{BOLD}{CYAN}║{RESET}   {RED}{BOLD} _____  ____   ___    _     ____  ____{RESET}      {BOLD}{CYAN}║{RESET}",
+        f"{BOLD}{CYAN}║{RESET}   {RED}{BOLD}|_   _||  _ \\ |_ _|  / \\   / ___||  ___|{RESET}     {BOLD}{CYAN}║{RESET}",
+        f"{BOLD}{CYAN}║{RESET}   {RED}{BOLD}  | |  | |_) | | |  / _ \\ | |  _ | |_{RESET}       {BOLD}{CYAN}║{RESET}",
+        f"{BOLD}{CYAN}║{RESET}   {RED}{BOLD}  | |  |  _ <  | | / ___ \\| |_| ||  _|{RESET}      {BOLD}{CYAN}║{RESET}",
+        f"{BOLD}{CYAN}║{RESET}   {RED}{BOLD}  |_|  |_| \\_\\|___/_/   \\_\\\\____||____|{RESET}     {BOLD}{CYAN}║{RESET}",
+        f"{BOLD}{CYAN}║{RESET}                                               {BOLD}{CYAN}║{RESET}",
+        f"{BOLD}{CYAN}║{RESET}          {BOLD}T H E   B O A R D   G A M E{RESET}          {BOLD}{CYAN}║{RESET}",
+        f"{BOLD}{CYAN}║{RESET}                                               {BOLD}{CYAN}║{RESET}",
+        f"{BOLD}{CYAN}╚═══════════════════════════════════════════════╝{RESET}",
+    ]
+    for line in centre_block(lines):
+        print(line)
     print()
     print(centre_text(f"  {BOLD}[1]{RESET} Just a regular day"))
     print(centre_text(f"  {RED}{BOLD}[2]{RESET} Late for work!"))
