@@ -362,8 +362,199 @@ def create_game(seed=None):
         gs.symptom_discards[st] = []
     gs.actions_remaining = NUM_PLAYERS * ACTIONS_PER_PLAYER
     return gs
- 
- 
+
+
+# ── Save / Load ──
+
+SAVE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "saves")
+
+
+def _serialize_symptom_card(card):
+    return {
+        "symptom_type": card.symptom_type.value,
+        "harm_values": list(card.harm_values),
+        "complications": [[t.value, c] for t, c in card.complications],
+        "face_up": card.face_up,
+    }
+
+
+def _deserialize_symptom_card(d):
+    st = SymptomType(d["symptom_type"])
+    complications = [(SymptomType(t), c) for t, c in d["complications"]]
+    return SymptomCard(
+        symptom_type=st,
+        harm_values=tuple(d["harm_values"]),
+        complications=complications,
+        face_up=d["face_up"],
+    )
+
+
+def _serialize_patient(patient):
+    return {
+        "id": patient.id,
+        "name": patient.name,
+        "severity": patient.severity,
+        "initial_symptoms": [s.value for s in patient.initial_symptoms],
+        "symptom_cards": [_serialize_symptom_card(c) for c in patient.symptom_cards],
+        "arrival_turn": patient.arrival_turn,
+        "checked_in": patient.checked_in,
+        "current_room": patient.current_room.value if patient.current_room else None,
+        "discharged": patient.discharged,
+        "admitted": patient.admitted,
+        "death_turn": patient.death_turn,
+        "discharge_turn": patient.discharge_turn,
+        "admitted_turn": patient.admitted_turn,
+        "stormed_out": patient.stormed_out,
+        "ready_for_discharge_turn": patient.ready_for_discharge_turn,
+    }
+
+
+def _deserialize_patient(d):
+    p = Patient(
+        id=d["id"],
+        name=d["name"],
+        severity=d["severity"],
+        initial_symptoms=[SymptomType(s) for s in d["initial_symptoms"]],
+    )
+    p.symptom_cards = [_deserialize_symptom_card(c) for c in d["symptom_cards"]]
+    p.arrival_turn = d["arrival_turn"]
+    p.checked_in = d["checked_in"]
+    p.current_room = RoomType(d["current_room"]) if d["current_room"] else None
+    p.discharged = d["discharged"]
+    p.admitted = d["admitted"]
+    p.death_turn = d["death_turn"]
+    p.discharge_turn = d["discharge_turn"]
+    p.admitted_turn = d["admitted_turn"]
+    p.stormed_out = d["stormed_out"]
+    p.ready_for_discharge_turn = d["ready_for_discharge_turn"]
+    return p
+
+
+def save_game(gs, active_player_id, slot_name=None):
+    """Save the current game state to a JSON file. Returns the save file path."""
+    os.makedirs(SAVE_DIR, exist_ok=True)
+    if slot_name is None:
+        slot_name = "save"
+    filepath = os.path.join(SAVE_DIR, f"{slot_name}.json")
+
+    # Rooms reference patients already in all_patients by ID
+    room_data = {}
+    for rt, room in gs.rooms.items():
+        room_data[rt.value] = {
+            "queue_ids": [p.id for p in room.queue],
+            "capacity": room.capacity,
+        }
+
+    data = {
+        "version": "1.6",
+        "turn": gs.turn,
+        "total_turns": gs.total_turns,
+        "actions_remaining": gs.actions_remaining,
+        "active_player_id": active_player_id,
+        "players": [{"id": p.id, "current_room": p.current_room.value,
+                      "action_count": p.action_count} for p in gs.players],
+        "all_patients": [_serialize_patient(p) for p in gs.all_patients],
+        "patient_deck": [_serialize_patient(p) for p in gs.patient_deck],
+        "rooms": room_data,
+        "symptom_decks": {
+            st.value: [_serialize_symptom_card(c) for c in deck]
+            for st, deck in gs.symptom_decks.items()
+        },
+        "symptom_discards": {
+            st.value: [_serialize_symptom_card(c) for c in pile]
+            for st, pile in gs.symptom_discards.items()
+        },
+        "log": gs.log,
+        "random_state": list(random.getstate()[1]),
+        "random_pos": random.getstate()[2],
+    }
+
+    with open(filepath, "w") as f:
+        json.dump(data, f, indent=2)
+    return filepath
+
+
+def load_game(filepath):
+    """Load a game state from a JSON file. Returns (GameState, active_player_id)."""
+    with open(filepath, "r") as f:
+        data = json.load(f)
+
+    gs = GameState()
+    gs.turn = data["turn"]
+    gs.total_turns = data["total_turns"]
+    gs.actions_remaining = data["actions_remaining"]
+
+    # Restore players
+    gs.players = []
+    for pd in data["players"]:
+        p = Player(id=pd["id"], current_room=RoomType(pd["current_room"]),
+                   action_count=pd["action_count"])
+        gs.players.append(p)
+
+    # Restore all_patients (the canonical patient objects)
+    patient_lookup = {}
+    gs.all_patients = []
+    for pd in data["all_patients"]:
+        p = _deserialize_patient(pd)
+        gs.all_patients.append(p)
+        patient_lookup[p.id] = p
+
+    # Restore patient_deck (these are separate patient objects not yet in play)
+    gs.patient_deck = []
+    for pd in data["patient_deck"]:
+        p = _deserialize_patient(pd)
+        gs.patient_deck.append(p)
+        patient_lookup[p.id] = p
+
+    # Restore rooms — queue references point to the same patient objects
+    gs.rooms = {}
+    for rt in RoomType:
+        rd = data["rooms"][rt.value]
+        room = Room(room_type=rt, capacity=rd["capacity"])
+        for pid in rd["queue_ids"]:
+            room.queue.append(patient_lookup[pid])
+        gs.rooms[rt] = room
+
+    # Restore symptom decks and discards
+    gs.symptom_decks = {}
+    gs.symptom_discards = {}
+    for st in SymptomType:
+        gs.symptom_decks[st] = [_deserialize_symptom_card(c)
+                                 for c in data["symptom_decks"][st.value]]
+        gs.symptom_discards[st] = [_deserialize_symptom_card(c)
+                                    for c in data["symptom_discards"][st.value]]
+
+    # Restore log
+    gs.log = data["log"]
+
+    # Restore random state
+    random_state = (3, tuple(data["random_state"]), data["random_pos"])
+    random.setstate(random_state)
+
+    active_player_id = data["active_player_id"]
+    return gs, active_player_id
+
+
+def list_save_files():
+    """Return a list of (display_name, filepath) for available save files."""
+    if not os.path.isdir(SAVE_DIR):
+        return []
+    saves = []
+    for fname in sorted(os.listdir(SAVE_DIR)):
+        if fname.endswith(".json"):
+            fpath = os.path.join(SAVE_DIR, fname)
+            try:
+                with open(fpath, "r") as f:
+                    data = json.load(f)
+                turn = data.get("turn", "?")
+                total = data.get("total_turns", "?")
+                slot = fname[:-5]  # strip .json
+                saves.append((f"{slot} — Turn {turn}/{total}", fpath))
+            except (json.JSONDecodeError, KeyError):
+                continue
+    return saves
+
+
 def _draw(gs, symptom_type):
     return draw_symptom_card(gs.symptom_decks[symptom_type],
                              gs.symptom_discards[symptom_type], symptom_type)
@@ -981,7 +1172,10 @@ def render_title_screen():
     print(f"  {DIM}Survive until 8:00 AM with no more than {DEATH_THRESHOLD} deaths.{RESET}")
     print(f"  {DIM}Each turn you have {NUM_PLAYERS * ACTIONS_PER_PLAYER} actions to share between your team.{RESET}")
     print()
+    saves = list_save_files()
     print(f"  {BOLD}[N]{RESET} New Game    {BOLD}[I]{RESET} Instructions    {BOLD}[Q]{RESET} Quit")
+    if saves:
+        print(f"  {BOLD}[L]{RESET} Load Game")
     print()
  
  
@@ -1363,18 +1557,54 @@ def run_interactive(seed=None):
             break
         elif choice == "i":
             render_how_to_play()
+        elif choice == "l":
+            saves = list_save_files()
+            if not saves:
+                print(f"  {RED}No saved games found.{RESET}")
+                continue
+            print()
+            print(f"  {BOLD}Saved Games:{RESET}")
+            for i, (label, _) in enumerate(saves):
+                print(f"    {BOLD}{i + 1}.{RESET} {label}")
+            print()
+            sel = input(f"  Load which save? (number, c = cancel): ").strip().lower()
+            if sel == "c":
+                continue
+            try:
+                idx = int(sel) - 1
+                if 0 <= idx < len(saves):
+                    _, fpath = saves[idx]
+                    gs, active = load_game(fpath)
+                    print(f"  {GREEN}Game loaded! Resuming at turn {gs.turn}...{RESET}")
+                    time.sleep(1)
+                    break
+                else:
+                    print(f"  {RED}Invalid choice.{RESET}")
+            except (ValueError, Exception) as e:
+                print(f"  {RED}Could not load save: {e}{RESET}")
         elif choice == "q":
             print("  Goodbye.")
             return
         else:
-            print(f"  {RED}Choose N, I, or Q.{RESET}")
- 
-    gs = create_game(seed=seed)
-    active = 1
- 
-    for turn in range(1, gs.total_turns + 1):
-        begin_turn(gs)
-        render_full_state(gs)
+            print(f"  {RED}Choose N, I, L, or Q.{RESET}")
+
+    # Start a new game or resume a loaded one
+    loaded = choice == "l"
+    if not loaded:
+        gs = create_game(seed=seed)
+        active = 1
+
+    # If loaded, resume the current turn's action phase first
+    resume_mid_turn = loaded and gs.actions_remaining > 0
+    start_turn = gs.turn if resume_mid_turn else (gs.turn + 1 if loaded else 1)
+
+    for turn in range(start_turn, gs.total_turns + 1):
+        if resume_mid_turn and turn == gs.turn:
+            # Resuming mid-turn: skip begin_turn, just show state and continue actions
+            render_full_state(gs)
+        else:
+            begin_turn(gs)
+            render_full_state(gs)
  
         while gs.actions_remaining > 0:
             render_action_menu(gs, active)
@@ -1564,7 +1794,12 @@ def run_interactive(seed=None):
                 render_full_state(gs)
  
             elif choice == "v":
-                print(f"  {YELLOW}Save feature coming soon!{RESET}")
+                try:
+                    path = save_game(gs, active)
+                    print(f"  {GREEN}Game saved successfully!{RESET}")
+                    print(f"  {DIM}({path}){RESET}")
+                except Exception as e:
+                    print(f"  {RED}Save failed: {e}{RESET}")
  
             elif choice == "q":
                 if input("  Quit the game? (y/n): ").strip().lower() == "y":
