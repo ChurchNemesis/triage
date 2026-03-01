@@ -1200,63 +1200,21 @@ def render_action_menu(gs, pid):
     print()
 
 
-def render_difficulty_selection():
-    """Show difficulty selection screen after New Game is selected."""
-    clear_screen()
-    print()
-    print(f"{BOLD}{CYAN}  ╔═══════════════════════════════════════════════╗{RESET}")
-    print(f"{BOLD}{CYAN}  ║{RESET}                                               {BOLD}{CYAN}║{RESET}")
-    print(f"{BOLD}{CYAN}  ║{RESET}   {RED}{BOLD} _____  ____   ___    _     ____  ____{RESET}      {BOLD}{CYAN}║{RESET}")
-    print(f"{BOLD}{CYAN}  ║{RESET}   {RED}{BOLD}|_   _||  _ \\ |_ _|  / \\   / ___||  __|{RESET}     {BOLD}{CYAN}║{RESET}")
-    print(f"{BOLD}{CYAN}  ║{RESET}   {RED}{BOLD}  | |  | |_) | | |  / _ \\ | |  _ | |_{RESET}       {BOLD}{CYAN}║{RESET}")
-    print(f"{BOLD}{CYAN}  ║{RESET}   {RED}{BOLD}  | |  |  _ <  | | / ___ \\| |_| ||  _|{RESET}      {BOLD}{CYAN}║{RESET}")
-    print(f"{BOLD}{CYAN}  ║{RESET}   {RED}{BOLD}  |_|  |_| \\_\\|___/_/   \\_\\\\____||____|{RESET}     {BOLD}{CYAN}║{RESET}")
-    print(f"{BOLD}{CYAN}  ║{RESET}                                               {BOLD}{CYAN}║{RESET}")
-    print(f"{BOLD}{CYAN}  ║{RESET}          {BOLD}T H E   B O A R D   G A M E{RESET}          {BOLD}{CYAN}║{RESET}")
-    print(f"{BOLD}{CYAN}  ║{RESET}                                               {BOLD}{CYAN}║{RESET}")
-    print(f"{BOLD}{CYAN}  ╚═══════════════════════════════════════════════╝{RESET}")
-    print()
-    print(centre_text(f"  {BOLD}[1]{RESET} Just a regular day"))
-    print(centre_text(f"  {RED}{BOLD}[2]{RESET} Late for work!"))
-    print()
-    print(centre_text(f"  {DIM}Choose difficulty (1 or 2):{RESET}"))
-    print()
-
-
-def render_late_for_work_text():
-    """Show the dramatic intro text for Late for Work mode."""
-    clear_screen()
-    print()
-    text = (
-        f"{RED}{BOLD}You are late for work!{RESET}\n\n"
-        f"Your laziness may have killed someone already.\n"
-        f"It's not good enough.\n\n"
-        f"Is this what you trained for?\n"
-        f"To lie about in bed while people were in pain.\n\n"
-        f"{RED}Do Better!{RESET}\n"
-    )
-    for line in text.split('\n'):
-        print(centre_text(f"  {line}"))
-    print()
-    print(centre_text(f"  {DIM}Press Enter to begin...{RESET}"))
-    input()
-
-
 def render_title_screen():
     clear_screen()
     print()
     lines = [
-        f"{BOLD}{CYAN}╔══════════════════════════════════════════════════════════╗{RESET}",
-        f"{BOLD}{CYAN}║{RESET}                                                          {BOLD}{CYAN}║{RESET}",
-        f"{BOLD}{CYAN}║{RESET}   {RED}{BOLD} _____  ____   ___    _     ____  __{RESET}                 {BOLD}{CYAN}║{RESET}",
-        f"{BOLD}{CYAN}║{RESET}   {RED}{BOLD}|_   _||  _ \\ |_ _|  / \\   / ___||  ___|{RESET}             {BOLD}{CYAN}║{RESET}",
-        f"{BOLD}{CYAN}║{RESET}   {RED}{BOLD}  | |  | |_) | | |  / _ \\ | |  _ | |_{RESET}               {BOLD}{CYAN}║{RESET}",
-        f"{BOLD}{CYAN}║{RESET}   {RED}{BOLD}  | |  |  _ <  | | / ___ \\| |_| ||  _|{RESET}              {BOLD}{CYAN}║{RESET}",
-        f"{BOLD}{CYAN}║{RESET}   {RED}{BOLD}  |_|  |_| \\_\\|___/_/   \\_\\\\____||____|{RESET}             {BOLD}{CYAN}║{RESET}",
-        f"{BOLD}{CYAN}║{RESET}                                                          {BOLD}{CYAN}║{RESET}",
-        f"{BOLD}{CYAN}║{RESET}          {BOLD}T H E   B O A R D   G A M E{RESET}                      {BOLD}{CYAN}║{RESET}",
-        f"{BOLD}{CYAN}║{RESET}                                                          {BOLD}{CYAN}║{RESET}",
-        f"{BOLD}{CYAN}╚══════════════════════════════════════════════════════════╝{RESET}",
+        f"{BOLD}{CYAN}╔═══════════════════════════════════════════════╗{RESET}",
+        f"{BOLD}{CYAN}║{RESET}                                               {BOLD}{CYAN}║{RESET}",
+        f"{BOLD}{CYAN}║{RESET}   {RED}{BOLD} _____  ____   ___    _     ____  ____{RESET}      {BOLD}{CYAN}║{RESET}",
+        f"{BOLD}{CYAN}║{RESET}   {RED}{BOLD}|_   _||  _ \\ |_ _|  / \\   / ___||  ___|{RESET}     {BOLD}{CYAN}║{RESET}",
+        f"{BOLD}{CYAN}║{RESET}   {RED}{BOLD}  | |  | |_) | | |  / _ \\ | |  _ | |_{RESET}       {BOLD}{CYAN}║{RESET}",
+        f"{BOLD}{CYAN}║{RESET}   {RED}{BOLD}  | |  |  _ <  | | / ___ \\| |_| ||  _|{RESET}      {BOLD}{CYAN}║{RESET}",
+        f"{BOLD}{CYAN}║{RESET}   {RED}{BOLD}  |_|  |_| \\_\\|___/_/   \\_\\\\____||____|{RESET}     {BOLD}{CYAN}║{RESET}",
+        f"{BOLD}{CYAN}║{RESET}                                               {BOLD}{CYAN}║{RESET}",
+        f"{BOLD}{CYAN}║{RESET}          {BOLD}T H E   B O A R D   G A M E{RESET}          {BOLD}{CYAN}║{RESET}",
+        f"{BOLD}{CYAN}║{RESET}                                               {BOLD}{CYAN}║{RESET}",
+        f"{BOLD}{CYAN}╚═══════════════════════════════════════════════╝{RESET}",
     ]
     for line in centre_block(lines):
         print(line)
@@ -1276,6 +1234,34 @@ def render_title_screen():
     if saves:
         print(centre_text(f"{BOLD}[L]{RESET} Load Game"))
     print()
+
+
+def render_difficulty_selection():
+    """Show difficulty selection screen after New Game is selected."""
+    clear_screen()
+    print()
+    lines = [
+        f"{BOLD}{CYAN}╔═══════════════════════════════════════════════╗{RESET}",
+        f"{BOLD}{CYAN}║{RESET}                                               {BOLD}{CYAN}║{RESET}",
+        f"{BOLD}{CYAN}║{RESET}   {RED}{BOLD} _____  ____   ___    _     ____  ____{RESET}      {BOLD}{CYAN}║{RESET}",
+        f"{BOLD}{CYAN}║{RESET}   {RED}{BOLD}|_   _||  _ \\ |_ _|  / \\   / ___||  ___|{RESET}     {BOLD}{CYAN}║{RESET}",
+        f"{BOLD}{CYAN}║{RESET}   {RED}{BOLD}  | |  | |_) | | |  / _ \\ | |  _ | |_{RESET}       {BOLD}{CYAN}║{RESET}",
+        f"{BOLD}{CYAN}║{RESET}   {RED}{BOLD}  | |  |  _ <  | | / ___ \\| |_| ||  _|{RESET}      {BOLD}{CYAN}║{RESET}",
+        f"{BOLD}{CYAN}║{RESET}   {RED}{BOLD}  |_|  |_| \\_\\|___/_/   \\_\\\\____||____|{RESET}     {BOLD}{CYAN}║{RESET}",
+        f"{BOLD}{CYAN}║{RESET}                                               {BOLD}{CYAN}║{RESET}",
+        f"{BOLD}{CYAN}║{RESET}          {BOLD}T H E   B O A R D   G A M E{RESET}          {BOLD}{CYAN}║{RESET}",
+        f"{BOLD}{CYAN}║{RESET}                                               {BOLD}{CYAN}║{RESET}",
+        f"{BOLD}{CYAN}╚═══════════════════════════════════════════════╝{RESET}",
+    ]
+    for line in centre_block(lines):
+        print(line)
+    print()
+    print(centre_text(f"  {BOLD}[1]{RESET} Just a regular day"))
+    print(centre_text(f"  {RED}{BOLD}[2]{RESET} Late for work!"))
+    print()
+    print(centre_text(f"  {DIM}Choose difficulty (1 or 2):{RESET}"))
+    print()
+
  
  
 def render_how_to_play():
