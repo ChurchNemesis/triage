@@ -45,7 +45,7 @@ SYMPTOM_DECK_SIZE = 60
 ROOM_CAPACITY = 5
 SINGLE_SYMPTOM_RATIO = 0.75
 MULTI_SYMPTOM_2_RATIO = 0.80
-SHIFT_START_HOUR = 20  # 8:00 PM
+SHIFT_START_HOUR = 19  # so turn 1 displays as 8:00 PM
 STORM_OUT_TURNS = 4    # turns before discharge-ready patients storm out
  
 # Harm table: (probability, sev1_harm, sev2_harm, sev3_harm)
@@ -318,6 +318,7 @@ class ActionError(Exception):
 class GameState:
     turn: int = 0
     total_turns: int = TOTAL_TURNS
+    shift_start_hour: int = SHIFT_START_HOUR
     rooms: dict = field(default_factory=dict)
     players: list = field(default_factory=list)
     actions_remaining: int = 0
@@ -329,7 +330,7 @@ class GameState:
  
     @property
     def shift_hour(self) -> str:
-        h = (SHIFT_START_HOUR + self.turn) % 24
+        h = (self.shift_start_hour + self.turn) % 24
         if h == 0: return "12:00 AM"
         if h < 12: return f"{h}:00 AM"
         if h == 12: return "12:00 PM"
@@ -364,6 +365,8 @@ def create_game(seed=None, late_for_work=False):
     gs.actions_remaining = NUM_PLAYERS * ACTIONS_PER_PLAYER
 
     if late_for_work:
+        gs.shift_start_hour = 20  # late start: turn 1 displays as 9:00 PM
+        gs.total_turns = 11       # fewer turns, still ends at 7:00 AM
         # Simulate turn 1: arrivals only (no harm tick, no auto functions yet)
         gs.turn = 1
         phase_arrivals(gs)
@@ -468,6 +471,7 @@ def save_game(gs, active_player_id, slot_name=None):
         "version": "1.6",
         "turn": gs.turn,
         "total_turns": gs.total_turns,
+        "shift_start_hour": gs.shift_start_hour,
         "actions_remaining": gs.actions_remaining,
         "active_player_id": active_player_id,
         "players": [{"id": p.id, "current_room": p.current_room.value,
@@ -501,6 +505,7 @@ def load_game(filepath):
     gs = GameState()
     gs.turn = data["turn"]
     gs.total_turns = data["total_turns"]
+    gs.shift_start_hour = data.get("shift_start_hour", SHIFT_START_HOUR)
     gs.actions_remaining = data["actions_remaining"]
 
     # Restore players
@@ -1034,7 +1039,7 @@ def count_current_deaths(gs):
  
  
 def render_header(gs):
-    turns_left = gs.total_turns - gs.turn
+    turns_left = gs.total_turns - gs.turn + 1
     progress = gs.turn / gs.total_turns
     bar_w = 30
     filled = int(progress * bar_w)
