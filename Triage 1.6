@@ -231,17 +231,17 @@ class Player:
 # ═══════════════════════════════════════════════════════════════
  
 FIRST_NAMES = [
-    "Alice", "Bob", "Charlie", "Diana", "Eddie", "Fiona", "George", "Hannah",
-    "Ian", "Julia", "Keith", "Laura", "Mike", "Nancy", "Oscar", "Penny",
-    "Quinn", "Rita", "Steve", "Tina", "Umar", "Vera", "Wayne", "Xena",
+    "Alice", "Bob", "Connal", "Diana", "Edith", "Fiona", "George", "Hannah",
+    "Ian", "Julia", "Keith", "Laura", "Mo", "Nadiya", "Oscar", "Penny",
+    "Quinn", "Rita", "Steve", "Tina", "Umar", "Vera", "Wei", "Xena",
     "Yusuf", "Zara", "Alfie", "Brenda", "Colin", "Doris", "Ernie", "Flora",
-    "Gavin", "Helen", "Ivan", "Janet", "Karl", "Linda", "Mick", "Nora",
-    "Owen", "Pat", "Raj", "Sue", "Tom", "Uma", "Vic", "Wendy",
-    "Archie", "Betty", "Clive", "Debra", "Frank", "Grace", "Hank", "Iris",
-    "Jim", "Kay", "Len", "Mabel", "Ned", "Olive", "Phil", "Rose",
-    "Sid", "Trudy", "Ulf", "Val", "Walt", "Yvonne", "Zack", "Agnes",
-    "Barry", "Cath", "Derek", "Elsie", "Fred", "Gwen", "Hugh", "Ivy",
-    "Jack", "Kim", "Les", "Meg", "Norm", "Opal", "Pete", "Ruth",
+    "Gavin", "Horris", "Ivan", "Janet", "Karl", "Linda", "Mick", "Nora",
+    "Olaf", "Pat", "Raj", "Sue", "Tom", "Uma", "Vic", "Wendy",
+    "Archie", "Bessy", "Clive", "Debra", "Franz", "Grace", "Horris 2", "Iris",
+    "Jim", "Kay", "Len", "Mabel", "Ned", "Oliver", "Phil", "Rose",
+    "Sid", "Trudy", "Ulf", "Val", "Wahid", "Yvonne", "Zack", "Agnes",
+    "Barry", "Cath", "Derek", "Elsie", "Femke", "Gwen", "Hugh", "Ivy",
+    "Jack", "Kim", "Les", "Moses", "Noor", "Olga", "Pete", "Rowan",
     "Sam", "Tess", "Uri", "Viv", "Will", "Xander", "Yoko", "Zelda",
 ]
  
@@ -1156,17 +1156,17 @@ def render_action_menu(gs, pid):
 def render_title_screen():
     clear_screen()
     print()
-    print(f"{BOLD}{CYAN}  ╔══════════════════════════════════════════════════════════╗{RESET}")
-    print(f"{BOLD}{CYAN}  ║{RESET}                                                          {BOLD}{CYAN}║{RESET}")
-    print(f"{BOLD}{CYAN}  ║{RESET}   {RED}{BOLD} _____  ____   ___    _     ____  __{RESET}                 {BOLD}{CYAN}║{RESET}")
-    print(f"{BOLD}{CYAN}  ║{RESET}   {RED}{BOLD}|_   _||  _ \\ |_ _|  / \\   / ___||  ___|{RESET}             {BOLD}{CYAN}║{RESET}")
-    print(f"{BOLD}{CYAN}  ║{RESET}   {RED}{BOLD}  | |  | |_) | | |  / _ \\ | |  _ | |_{RESET}               {BOLD}{CYAN}║{RESET}")
-    print(f"{BOLD}{CYAN}  ║{RESET}   {RED}{BOLD}  | |  |  _ <  | | / ___ \\| |_| ||  _|{RESET}              {BOLD}{CYAN}║{RESET}")
-    print(f"{BOLD}{CYAN}  ║{RESET}   {RED}{BOLD}  |_|  |_| \\_\\|___/_/   \\_\\\\____||____|{RESET}             {BOLD}{CYAN}║{RESET}")
-    print(f"{BOLD}{CYAN}  ║{RESET}                                                          {BOLD}{CYAN}║{RESET}")
-    print(f"{BOLD}{CYAN}  ║{RESET}          {BOLD}T H E   B O A R D   G A M E{RESET}                      {BOLD}{CYAN}║{RESET}")
-    print(f"{BOLD}{CYAN}  ║{RESET}                                                          {BOLD}{CYAN}║{RESET}")
-    print(f"{BOLD}{CYAN}  ╚══════════════════════════════════════════════════════════╝{RESET}")
+    print(f"{BOLD}{CYAN}  ╔═══════════════════════════════════════════════╗{RESET}")
+    print(f"{BOLD}{CYAN}  ║{RESET}                                               {BOLD}{CYAN}║{RESET}")
+    print(f"{BOLD}{CYAN}  ║{RESET}   {RED}{BOLD} _____  ____   ___    _     ____  ____{RESET}      {BOLD}{CYAN}║{RESET}")
+    print(f"{BOLD}{CYAN}  ║{RESET}   {RED}{BOLD}|_   _||  _ \\ |_ _|  / \\   / ___||  __|{RESET}     {BOLD}{CYAN}║{RESET}")
+    print(f"{BOLD}{CYAN}  ║{RESET}   {RED}{BOLD}  | |  | |_) | | |  / _ \\ | |  _ | |_{RESET}       {BOLD}{CYAN}║{RESET}")
+    print(f"{BOLD}{CYAN}  ║{RESET}   {RED}{BOLD}  | |  |  _ <  | | / ___ \\| |_| ||  _|{RESET}      {BOLD}{CYAN}║{RESET}")
+    print(f"{BOLD}{CYAN}  ║{RESET}   {RED}{BOLD}  |_|  |_| \\_\\|___/_/   \\_\\\\____||____|{RESET}     {BOLD}{CYAN}║{RESET}")
+    print(f"{BOLD}{CYAN}  ║{RESET}                                               {BOLD}{CYAN}║{RESET}")
+    print(f"{BOLD}{CYAN}  ║{RESET}          {BOLD}T H E   B O A R D   G A M E{RESET}          {BOLD}{CYAN}║{RESET}")
+    print(f"{BOLD}{CYAN}  ║{RESET}                                               {BOLD}{CYAN}║{RESET}")
+    print(f"{BOLD}{CYAN}  ╚═══════════════════════════════════════════════╝{RESET}")
     print()
     print(f"  {DIM}You control {NUM_PLAYERS} staff members working the night shift.{RESET}")
     print(f"  {DIM}Survive until 8:00 AM with no more than {DEATH_THRESHOLD} deaths.{RESET}")
