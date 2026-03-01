@@ -1262,8 +1262,7 @@ def render_difficulty_selection():
     print(centre_text(f"  {DIM}Choose difficulty (1 or 2):{RESET}"))
     print()
 
- 
- 
+
 def render_how_to_play():
     clear_screen()
     lines = [
@@ -1652,7 +1651,7 @@ def run_interactive(seed=None):
             # Show difficulty selection for new game
             while True:
                 render_difficulty_selection()
-                diff_choice = input(centre_text("  > ")).strip().lower()
+                diff_choice = input("  > ").strip().lower()
                 if diff_choice == "1":
                     late_for_work = False
                     break
