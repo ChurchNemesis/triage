@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import random
+import shutil
 import sys
 import time
 from dataclasses import dataclass, field
@@ -343,8 +344,8 @@ class GameState:
                 return room
         return None
  
- 
-def create_game(seed=None):
+
+def create_game(seed=None, late_for_work=False):
     if seed is not None:
         random.seed(seed)
     gs = GameState()
@@ -361,6 +362,23 @@ def create_game(seed=None):
         gs.symptom_decks[st] = generate_symptom_deck(st)
         gs.symptom_discards[st] = []
     gs.actions_remaining = NUM_PLAYERS * ACTIONS_PER_PLAYER
+
+    if late_for_work:
+        # Simulate turn 1: arrivals only (no harm tick, no auto functions yet)
+        gs.turn = 1
+        phase_arrivals(gs)
+        # Simulate turn 2: arrivals
+        gs.turn = 2
+        phase_arrivals(gs)
+        # Auto-check-in: simulate the waiting room auto-function checking in one patient
+        waiting = gs.get_room(RoomType.WAITING)
+        if waiting.queue and not waiting.queue[0].checked_in:
+            patient = waiting.queue[0]
+            patient.checked_in = True
+            assign_symptom_cards(gs, patient)
+        # Reset turn to 1 so the first begin_turn call increments it to 2
+        gs.turn = 1
+
     return gs
 
 
@@ -434,7 +452,10 @@ def save_game(gs, active_player_id, slot_name=None):
     """Save the current game state to a JSON file. Returns the save file path."""
     os.makedirs(SAVE_DIR, exist_ok=True)
     if slot_name is None:
-        slot_name = "save"
+        # Prompt for a save file name
+        slot_name = input(centre_text("Enter a name for this save game: ")).strip()
+        if not slot_name:
+            slot_name = "save"
     filepath = os.path.join(SAVE_DIR, f"{slot_name}.json")
 
     # Rooms reference patients already in all_patients by ID
@@ -980,8 +1001,33 @@ def clear_screen():
         os.system("cls")
     else:
         print("\033[2J\033[H", end="")
- 
- 
+
+
+def get_terminal_width():
+    """Get terminal width, default to 80 if unable to determine."""
+    try:
+        return shutil.get_terminal_size(fallback=(80, 24)).columns
+    except:
+        return 80
+
+
+def centre_text(text):
+    """Centre a line of text within the terminal width."""
+    width = get_terminal_width()
+    # Strip ANSI codes to calculate actual visible width
+    visible_text = text
+    for code in [RESET, BOLD, DIM, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, WHITE, BG_RED, BG_GREEN]:
+        visible_text = visible_text.replace(code, "")
+    visible_len = len(visible_text)
+    padding = max(0, (width - visible_len) // 2)
+    return " " * padding + text
+
+
+def centre_block(lines):
+    """Centre a block of text lines. Returns list of centred lines."""
+    return [centre_text(line) for line in lines]
+
+
 def count_current_deaths(gs):
     return sum(1 for p in gs.all_patients
                if not p.discharged and not p.admitted
@@ -1153,7 +1199,9 @@ def render_action_menu(gs, pid):
     print(f"    {BOLD}q{RESET} - Quit game")
     print()
 
-def render_title_screen():
+
+def render_difficulty_selection():
+    """Show difficulty selection screen after New Game is selected."""
     clear_screen()
     print()
     print(f"{BOLD}{CYAN}  ╔═══════════════════════════════════════════════╗{RESET}")
@@ -1168,86 +1216,141 @@ def render_title_screen():
     print(f"{BOLD}{CYAN}  ║{RESET}                                               {BOLD}{CYAN}║{RESET}")
     print(f"{BOLD}{CYAN}  ╚═══════════════════════════════════════════════╝{RESET}")
     print()
-    print(f"  {DIM}You control {NUM_PLAYERS} staff members working the night shift.{RESET}")
-    print(f"  {DIM}Survive until 8:00 AM with no more than {DEATH_THRESHOLD} deaths.{RESET}")
-    print(f"  {DIM}Each turn you have {NUM_PLAYERS * ACTIONS_PER_PLAYER} actions to share between your team.{RESET}")
+    print(centre_text(f"  {BOLD}[1]{RESET} Just a regular day"))
+    print(centre_text(f"  {RED}{BOLD}[2]{RESET} Late for work!"))
+    print()
+    print(centre_text(f"  {DIM}Choose difficulty (1 or 2):{RESET}"))
+    print()
+
+
+def render_late_for_work_text():
+    """Show the dramatic intro text for Late for Work mode."""
+    clear_screen()
+    print()
+    text = (
+        f"{RED}{BOLD}You are late for work!{RESET}\n\n"
+        f"Your laziness may have killed someone already.\n"
+        f"It's not good enough.\n\n"
+        f"Is this what you trained for?\n"
+        f"To lie about in bed while people were in pain.\n\n"
+        f"{RED}Do Better!{RESET}\n"
+    )
+    for line in text.split('\n'):
+        print(centre_text(f"  {line}"))
+    print()
+    print(centre_text(f"  {DIM}Press Enter to begin...{RESET}"))
+    input()
+
+
+def render_title_screen():
+    clear_screen()
+    print()
+    lines = [
+        f"{BOLD}{CYAN}╔══════════════════════════════════════════════════════════╗{RESET}",
+        f"{BOLD}{CYAN}║{RESET}                                                          {BOLD}{CYAN}║{RESET}",
+        f"{BOLD}{CYAN}║{RESET}   {RED}{BOLD} _____  ____   ___    _     ____  __{RESET}                 {BOLD}{CYAN}║{RESET}",
+        f"{BOLD}{CYAN}║{RESET}   {RED}{BOLD}|_   _||  _ \\ |_ _|  / \\   / ___||  ___|{RESET}             {BOLD}{CYAN}║{RESET}",
+        f"{BOLD}{CYAN}║{RESET}   {RED}{BOLD}  | |  | |_) | | |  / _ \\ | |  _ | |_{RESET}               {BOLD}{CYAN}║{RESET}",
+        f"{BOLD}{CYAN}║{RESET}   {RED}{BOLD}  | |  |  _ <  | | / ___ \\| |_| ||  _|{RESET}              {BOLD}{CYAN}║{RESET}",
+        f"{BOLD}{CYAN}║{RESET}   {RED}{BOLD}  |_|  |_| \\_\\|___/_/   \\_\\\\____||____|{RESET}             {BOLD}{CYAN}║{RESET}",
+        f"{BOLD}{CYAN}║{RESET}                                                          {BOLD}{CYAN}║{RESET}",
+        f"{BOLD}{CYAN}║{RESET}          {BOLD}T H E   B O A R D   G A M E{RESET}                      {BOLD}{CYAN}║{RESET}",
+        f"{BOLD}{CYAN}║{RESET}                                                          {BOLD}{CYAN}║{RESET}",
+        f"{BOLD}{CYAN}╚══════════════════════════════════════════════════════════╝{RESET}",
+    ]
+    for line in centre_block(lines):
+        print(line)
+    print()
+    for line in centre_block([
+        f"{DIM}You control {NUM_PLAYERS} staff members working the night shift.{RESET}",
+        f"{DIM}Survive until 8:00 AM with no more than {DEATH_THRESHOLD} deaths.{RESET}",
+        f"{DIM}Each turn you have {NUM_PLAYERS * ACTIONS_PER_PLAYER} actions to share between your team.{RESET}",
+    ]):
+        print(line)
     print()
     saves = list_save_files()
-    print(f"  {BOLD}[N]{RESET} New Game    {BOLD}[I]{RESET} Instructions    {BOLD}[Q]{RESET} Quit")
+    for line in centre_block([
+        f"{BOLD}[N]{RESET} New Game    {BOLD}[I]{RESET} Instructions    {BOLD}[Q]{RESET} Quit",
+    ]):
+        print(line)
     if saves:
-        print(f"  {BOLD}[L]{RESET} Load Game")
+        print(centre_text(f"{BOLD}[L]{RESET} Load Game"))
     print()
  
  
 def render_how_to_play():
     clear_screen()
-    print(f"{BOLD}{CYAN}{'=' * 60}{RESET}")
-    print(f"{BOLD}  HOW TO PLAY TRIAGE{RESET}")
-    print(f"{CYAN}{'=' * 60}{RESET}")
-    print()
-    print(f"  {BOLD}GOAL{RESET}")
-    print(f"  Survive a 12-hour night shift in A&E (8 PM to 8 AM).")
-    print(f"  If more than {DEATH_THRESHOLD} patients die, you lose.")
-    print()
-    print(f"  {BOLD}TURN STRUCTURE{RESET}")
-    print(f"  Each turn represents 1 hour:")
-    print(f"    1. {YELLOW}Harm tick{RESET} — all patients accumulate damage")
-    print(f"    2. {CYAN}Arrivals{RESET} — new patients enter the Waiting Room")
-    print(f"    3. {GREEN}Player actions{RESET} — {NUM_PLAYERS * ACTIONS_PER_PLAYER} actions shared between {NUM_PLAYERS} staff")
-    print(f"    4. {MAGENTA}Room auto-functions{RESET} — rooms process their front patient")
-    print()
-    print(f"  {BOLD}PLAYER ACTIONS{RESET}")
-    print(f"    {BOLD}m{RESET} - Move       Move to an adjacent room (hub-and-spoke layout)")
-    print(f"    {BOLD}d{RESET} - Room action Depends on your room:")
-    print(f"                    Waiting Room → check in front patient")
-    print(f"                    Blood/Bone/Brain → diagnose up to 2 matching symptoms")
-    print(f"                    Admittance → transfer front patient out of the game")
-    print(f"    {BOLD}s{RESET} - Send       Send a patient to another room or discharge them")
-    print(f"    {BOLD}k{RESET} - Call       Call a patient from another room to yours")
-    print(f"    {BOLD}r{RESET} - Rearrange  Reorder the queue in your current room")
-    print(f"    {BOLD}p{RESET} - Switch     Switch which player you're controlling")
-    print(f"    {BOLD}e{RESET} - End turn   Forfeit remaining actions")
-    print()
-    print(f"  {BOLD}PATIENTS{RESET}")
-    print(f"  Each patient has a severity (1-3) and symptom cards.")
-    print(f"    Severity 1 ({GREEN}green{RESET}) — mild, low harm per symptom")
-    print(f"    Severity 2 ({YELLOW}yellow{RESET}) — moderate harm")
-    print(f"    Severity 3 ({RED}red{RESET}) — critical, high harm per symptom")
-    print(f"  Patients accumulate harm each turn based on their diagnosed")
-    print(f"  symptom cards. If harm reaches {PATIENT_HEALTH}, they die.")
-    print()
-    print(f"  {BOLD}DIAGNOSIS{RESET}")
-    print(f"  Diagnosing flips up to 2 matching symptom cards in a room.")
-    print(f"  Some cards cause complications — adding new undiagnosed symptoms.")
-    print(f"  After diagnosis, the patient returns to the Waiting Room.")
-    print()
-    print(f"  {BOLD}HOSPITAL LAYOUT (hub-and-spoke){RESET}")
-    print(f"                    Blood Room")
-    print(f"                         |")
-    print(f"    Bone Room -- Waiting Room -- Brain Room")
-    print(f"                         |")
-    print(f"                    Admittance")
-    print(f"  All rooms connect through the Waiting Room.")
-    print()
-    print(f"  {BOLD}ROOM AUTO-FUNCTIONS (end of each turn){RESET}")
-    print(f"  - Waiting Room: checks in 1 unchecked patient")
-    print(f"  - Blood/Bone/Brain: diagnoses up to 2 matching symptoms on front patient")
-    print(f"  - Admittance: transfers front patient out of the game")
-    print()
-    print(f"  {BOLD}DISCHARGE{RESET}")
-    print(f"  Fully diagnosed patients with 0 harm rate are tagged DISCHARGE READY.")
-    print(f"  You can discharge them with the send action (s).")
-    print(f"  If not discharged within {STORM_OUT_TURNS} turns, they storm out on their own.")
-    print()
-    print(f"  {BOLD}ENDGAME AUDIT{RESET}")
-    print(f"  When the shift ends, all remaining patients are fully assessed.")
-    print(f"  Any whose total harm exceeds {PATIENT_HEALTH} are counted as dead.")
-    print()
-    print(f"  {BOLD}WIN / LOSE{RESET}")
-    print(f"  {GREEN}Win{RESET}: {DEATH_THRESHOLD} or fewer deaths across the whole game + audit.")
-    print(f"  {RED}Lose{RESET}: More than {DEATH_THRESHOLD} deaths total.")
-    print()
-    print(f"  {DIM}Press Enter to return...{RESET}")
+    lines = [
+        f"{BOLD}{CYAN}{'=' * 60}{RESET}",
+        f"{BOLD}  HOW TO PLAY TRIAGE{RESET}",
+        f"{CYAN}{'=' * 60}{RESET}",
+        "",
+        f"{BOLD}GOAL{RESET}",
+        f"Survive a 12-hour night shift in A&E (8 PM to 8 AM).",
+        f"If more than {DEATH_THRESHOLD} patients die, you lose.",
+        "",
+        f"{BOLD}TURN STRUCTURE{RESET}",
+        f"Each turn represents 1 hour:",
+        f"  1. {YELLOW}Harm tick{RESET} — all patients accumulate damage",
+        f"  2. {CYAN}Arrivals{RESET} — new patients enter the Waiting Room",
+        f"  3. {GREEN}Player actions{RESET} — {NUM_PLAYERS * ACTIONS_PER_PLAYER} actions shared between {NUM_PLAYERS} staff",
+        f"  4. {MAGENTA}Room auto-functions{RESET} — rooms process their front patient",
+        "",
+        f"{BOLD}PLAYER ACTIONS{RESET}",
+        f"  {BOLD}m{RESET} - Move       Move to an adjacent room (hub-and-spoke layout)",
+        f"  {BOLD}d{RESET} - Room action Depends on your room:",
+        f"                  Waiting Room → check in front patient",
+        f"                  Blood/Bone/Brain → diagnose up to 2 matching symptoms",
+        f"                  Admittance → transfer front patient out of the game",
+        f"  {BOLD}s{RESET} - Send       Send a patient to another room or discharge them",
+        f"  {BOLD}k{RESET} - Call       Call a patient from another room to yours",
+        f"  {BOLD}r{RESET} - Rearrange  Reorder the queue in your current room",
+        f"  {BOLD}p{RESET} - Switch     Switch which player you're controlling",
+        f"  {BOLD}e{RESET} - End turn   Forfeit remaining actions",
+        "",
+        f"{BOLD}PATIENTS{RESET}",
+        f"Each patient has a severity (1-3) and symptom cards.",
+        f"  Severity 1 ({GREEN}green{RESET}) — mild, low harm per symptom",
+        f"  Severity 2 ({YELLOW}yellow{RESET}) — moderate harm",
+        f"  Severity 3 ({RED}red{RESET}) — critical, high harm per symptom",
+        f"Patients accumulate harm each turn based on their diagnosed",
+        f"symptom cards. If harm reaches {PATIENT_HEALTH}, they die.",
+        "",
+        f"{BOLD}DIAGNOSIS{RESET}",
+        f"Diagnosing flips up to 2 matching symptom cards in a room.",
+        f"Some cards cause complications — adding new undiagnosed symptoms.",
+        f"After diagnosis, the patient returns to the Waiting Room.",
+        "",
+        f"{BOLD}HOSPITAL LAYOUT (hub-and-spoke){RESET}",
+        f"                  Blood Room",
+        f"                       |",
+        f"  Bone Room -- Waiting Room -- Brain Room",
+        f"                       |",
+        f"                  Admittance",
+        f"All rooms connect through the Waiting Room.",
+        "",
+        f"{BOLD}ROOM AUTO-FUNCTIONS (end of each turn){RESET}",
+        f"- Waiting Room: checks in 1 unchecked patient",
+        f"- Blood/Bone/Brain: diagnoses up to 2 matching symptoms on front patient",
+        f"- Admittance: transfers front patient out of the game",
+        "",
+        f"{BOLD}DISCHARGE{RESET}",
+        f"Fully diagnosed patients with 0 harm rate are tagged DISCHARGE READY.",
+        f"You can discharge them with the send action (s).",
+        f"If not discharged within {STORM_OUT_TURNS} turns, they storm out on their own.",
+        "",
+        f"{BOLD}ENDGAME AUDIT{RESET}",
+        f"When the shift ends, all remaining patients are fully assessed.",
+        f"Any whose total harm exceeds {PATIENT_HEALTH} are counted as dead.",
+        "",
+        f"{BOLD}WIN / LOSE{RESET}",
+        f"{GREEN}Win{RESET}: {DEATH_THRESHOLD} or fewer deaths across the whole game + audit.",
+        f"{RED}Lose{RESET}: More than {DEATH_THRESHOLD} deaths total.",
+        "",
+        f"{DIM}Press Enter to return...{RESET}",
+    ]
+    for line in centre_block(lines):
+        print(line)
     input()
  
  
@@ -1415,47 +1518,52 @@ def render_audit_sequence(gs):
     """Show dramatic patient-by-patient audit at end of game."""
     # Get remaining patients (not yet discharged/admitted)
     remaining = [p for p in gs.all_patients if not p.discharged and not p.admitted]
- 
+
     clear_screen()
-    print(f"{BOLD}{CYAN}{'=' * 60}{RESET}")
-    print(f"{BOLD}  END-OF-SHIFT AUDIT{RESET}")
-    print(f"{CYAN}{'=' * 60}{RESET}")
+    header_lines = [
+        f"{BOLD}{CYAN}{'=' * 60}{RESET}",
+        f"{BOLD}  END-OF-SHIFT AUDIT{RESET}",
+        f"{CYAN}{'=' * 60}{RESET}",
+    ]
+    for line in centre_block(header_lines):
+        print(line)
     print()
-    print(f"  The next shift has arrived. Time to hand over.")
-    print(f"  {len(remaining)} patient{'s' if len(remaining) != 1 else ''} remain"
-          f" in the system and must be fully assessed.")
+    print(centre_text(f"The next shift has arrived. Time to hand over."))
+    print(centre_text(f"{len(remaining)} patient{'s' if len(remaining) != 1 else ''} remain"
+          f" in the system and must be fully assessed."))
     print()
-    input(f"  Press Enter to begin the audit...")
+    input(centre_text(f"Press Enter to begin the audit..."))
     print()
- 
+
     for p in remaining:
         # Check in if needed
         if not p.checked_in:
             p.checked_in = True
             assign_symptom_cards(gs, p)
- 
+
         # Diagnose all remaining cards
         for _ in range(100):
             undiag = [c for c in p.symptom_cards if not c.face_up]
             if not undiag:
                 break
             _diagnose_card(gs, p, undiag[0])
- 
+
         total_harm = p.cumulative_harm_total(gs.total_turns)
         is_dead = total_harm >= PATIENT_HEALTH
- 
+
         sc = SEV_COLORS.get(p.severity, WHITE)
         if is_dead:
             status = f"{BG_RED}{WHITE}{BOLD} DEAD {RESET}"
         else:
             status = f"{BG_GREEN}{WHITE}{BOLD} SURVIVED {RESET}"
- 
-        print(f"  {BOLD}{p.name}{RESET} (Sev {sc}{p.severity}{RESET})"
-              f"  Total harm: {total_harm}/{PATIENT_HEALTH}  ...  {status}")
+
+        line = (f"{BOLD}{p.name}{RESET} (Sev {sc}{p.severity}{RESET})"
+                f"  Total harm: {total_harm}/{PATIENT_HEALTH}  ...  {status}")
+        print(centre_text(line))
         time.sleep(0.6)
- 
+
     print()
-    input(f"  Press Enter to see the final report...")
+    input(centre_text(f"Press Enter to see the final report..."))
  
  
 def render_end_of_game(gs, result):
@@ -1549,11 +1657,25 @@ def input_patient(prompt, patients):
  
  
 def run_interactive(seed=None):
-       # Title screen menu loop
+    # Title screen menu loop
+    late_for_work = False
     while True:
         render_title_screen()
         choice = input(f"  > ").strip().lower()
         if choice == "n":
+            # Show difficulty selection for new game
+            while True:
+                render_difficulty_selection()
+                diff_choice = input(centre_text("  > ")).strip().lower()
+                if diff_choice == "1":
+                    late_for_work = False
+                    break
+                elif diff_choice == "2":
+                    late_for_work = True
+                    render_late_for_work_text()
+                    break
+                else:
+                    print(centre_text(f"  {RED}Choose 1 or 2.{RESET}"))
             break
         elif choice == "i":
             render_how_to_play()
@@ -1591,7 +1713,7 @@ def run_interactive(seed=None):
     # Start a new game or resume a loaded one
     loaded = choice == "l"
     if not loaded:
-        gs = create_game(seed=seed)
+        gs = create_game(seed=seed, late_for_work=late_for_work)
         active = 1
 
     # If loaded, resume the current turn's action phase first
