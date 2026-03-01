@@ -1,1 +1,2134 @@
+__pycache__/
+*.pyc
+saves/
+#!/usr/bin/env python3
+"""
+TRIAGE: The Board Game — Digital Simulation (Single-File Edition)
+ 
+A cooperative board game about running an overnight A&E department.
+1-3 players work together to survive a night shift.
+ 
+Usage:
+    python triage.py                         Interactive mode
+    python triage.py --mode simulate         Run 100 AI-simulated games
+    python triage.py --mode simulate -n 500  Simulate 500 games
+    python triage.py --seed 42               Reproducible game
+    python triage.py --mode simulate -v      Verbose simulation
+"""
+from __future__ import annotations
+ 
+import argparse
+import json
+import os
+import random
+import sys
+import time
+from dataclasses import dataclass, field
+from datetime import date
+from enum import Enum
+from typing import Optional
+ 
+ 
+# ═══════════════════════════════════════════════════════════════
+# CONFIGURATION — All tunable game variables
+# ═══════════════════════════════════════════════════════════════
+ 
+DEATH_THRESHOLD = 2
+TOTAL_TURNS = 12
+NUM_PLAYERS = 3
+ACTIONS_PER_PLAYER = 4
+ARRIVALS_PER_TURN = 4  # fallback; ARRIVAL_CURVE overrides per-turn
+ARRIVAL_CURVE = [4, 4, 4, 4, 3, 3, 3, 3, 2, 2, 2, 2]
+TOTAL_PATIENTS = 36
+PATIENT_HEALTH = 36
+SEVERITY_WEIGHTS = {1: 0.45, 2: 0.40, 3: 0.15}
+BRANCHING_FACTOR = 0.72
+SYMPTOM_DECK_SIZE = 60
+ROOM_CAPACITY = 5
+SINGLE_SYMPTOM_RATIO = 0.75
+MULTI_SYMPTOM_2_RATIO = 0.80
+SHIFT_START_HOUR = 20  # 8:00 PM
+STORM_OUT_TURNS = 4    # turns before discharge-ready patients storm out
+ 
+# Harm table: (probability, sev1_harm, sev2_harm, sev3_harm)
+# Slight bump to severity 1 and 2 compared to original
+SYMPTOM_HARM_TABLE = [
+    (0.30, 0, 0, 0),
+    (0.20, 0, 0, 1),
+    (0.15, 0, 1, 1),
+    (0.12, 1, 1, 2),   # sev1: 0->1
+    (0.10, 0, 1, 2),   # sev2: 0->1
+    (0.05, 1, 1, 2),
+    (0.04, 0, 1, 3),
+    (0.02, 1, 2, 3),
+    (0.01, 0, 2, 3),
+    (0.01, 1, 2, 4),
+]
+ 
+SYMPTOM_COMPLICATION_TABLE = [
+    (0.40, []),
+    (0.20, [(0, 1)]),
+    (0.10, [(1, 1)]),
+    (0.10, [(2, 1)]),
+    (0.10, [(0, 2)]),
+    (0.04, [(0, 1), (1, 1)]),
+    (0.04, [(0, 1), (2, 1)]),
+    (0.02, [(0, 3)]),
+]
+ 
+ 
+# ═══════════════════════════════════════════════════════════════
+# MODELS
+# ═══════════════════════════════════════════════════════════════
+ 
+class SymptomType(Enum):
+    BLOOD = "Blood"
+    BONE = "Bone"
+    BRAIN = "Brain"
+ 
+    def type_by_offset(self, offset: int) -> SymptomType:
+        order = [SymptomType.BLOOD, SymptomType.BONE, SymptomType.BRAIN]
+        idx = order.index(self)
+        return order[(idx + offset) % 3]
+ 
+ 
+class RoomType(Enum):
+    WAITING = "Waiting Room"
+    BLOOD = "Blood Room"
+    BONE = "Bone Room"
+    BRAIN = "Brain Room"
+    ADMITTANCE = "Admittance"
+ 
+ 
+ROOM_TO_SYMPTOM = {
+    RoomType.BLOOD: SymptomType.BLOOD,
+    RoomType.BONE: SymptomType.BONE,
+    RoomType.BRAIN: SymptomType.BRAIN,
+}
+SYMPTOM_TO_ROOM = {v: k for k, v in ROOM_TO_SYMPTOM.items()}
+ 
+ADJACENT = {
+    RoomType.WAITING: {RoomType.BLOOD, RoomType.BONE, RoomType.BRAIN, RoomType.ADMITTANCE},
+    RoomType.BLOOD: {RoomType.WAITING},
+    RoomType.BONE: {RoomType.WAITING},
+    RoomType.BRAIN: {RoomType.WAITING},
+    RoomType.ADMITTANCE: {RoomType.WAITING},
+}
+ 
+ 
+@dataclass
+class SymptomCard:
+    symptom_type: SymptomType
+    harm_values: tuple       # (sev1, sev2, sev3)
+    complications: list      # [(SymptomType, count), ...]
+    face_up: bool = False
+ 
+    def harm_for_severity(self, severity: int) -> int:
+        return self.harm_values[severity - 1]
+ 
+    @property
+    def complication_text(self) -> str:
+        if not self.complications:
+            return "No further issues"
+        return ", ".join(f"+{c} {t.value}" for t, c in self.complications)
+ 
+ 
+@dataclass
+class Patient:
+    id: int
+    name: str
+    severity: int
+    initial_symptoms: list
+    symptom_cards: list = field(default_factory=list)
+    arrival_turn: Optional[int] = None
+    checked_in: bool = False
+    current_room: Optional[RoomType] = None
+    discharged: bool = False
+    admitted: bool = False
+    # Tracking fields
+    death_turn: Optional[int] = None              # turn when visible harm first reached max
+    discharge_turn: Optional[int] = None          # turn when discharged
+    admitted_turn: Optional[int] = None            # turn when admitted/transferred
+    stormed_out: bool = False                      # auto-discharged after waiting too long
+    ready_for_discharge_turn: Optional[int] = None # turn when first tagged discharge-ready
+ 
+    @property
+    def harm_rate(self) -> int:
+        return sum(c.harm_for_severity(self.severity) for c in self.symptom_cards if c.face_up)
+ 
+    @property
+    def total_harm_rate(self) -> int:
+        return sum(c.harm_for_severity(self.severity) for c in self.symptom_cards)
+ 
+    def cumulative_harm(self, current_turn: int) -> int:
+        if self.arrival_turn is None:
+            return 0
+        raw = self.harm_rate * (current_turn - self.arrival_turn)
+        return min(raw, PATIENT_HEALTH)
+ 
+    def cumulative_harm_total(self, current_turn: int) -> int:
+        if self.arrival_turn is None:
+            return 0
+        raw = self.total_harm_rate * (current_turn - self.arrival_turn)
+        return min(raw, PATIENT_HEALTH)
+ 
+    @property
+    def is_fully_diagnosed(self) -> bool:
+        return all(c.face_up for c in self.symptom_cards)
+ 
+    @property
+    def undiagnosed_cards(self) -> list:
+        return [c for c in self.symptom_cards if not c.face_up]
+ 
+    @property
+    def undiagnosed_types(self) -> set:
+        return {c.symptom_type for c in self.symptom_cards if not c.face_up}
+ 
+    @property
+    def can_discharge(self) -> bool:
+        return self.is_fully_diagnosed and self.harm_rate == 0
+ 
+    @property
+    def needs_admittance(self) -> bool:
+        return self.is_fully_diagnosed and self.harm_rate > 0
+ 
+ 
+@dataclass
+class Room:
+    room_type: RoomType
+    queue: list = field(default_factory=list)
+    capacity: Optional[int] = None
+ 
+    @property
+    def is_full(self) -> bool:
+        if self.capacity is None:
+            return False
+        return len(self.queue) >= self.capacity
+ 
+    @property
+    def patient_count(self) -> int:
+        return len(self.queue)
+ 
+    def add_patient(self, patient: Patient, position: Optional[int] = None):
+        if self.is_full:
+            raise ValueError(f"{self.room_type.value} is full ({self.capacity})")
+        if position is not None:
+            self.queue.insert(position, patient)
+        else:
+            self.queue.append(patient)
+        patient.current_room = self.room_type
+ 
+    def remove_patient(self, patient: Patient):
+        self.queue.remove(patient)
+ 
+ 
+@dataclass
+class Player:
+    id: int
+    current_room: RoomType = RoomType.WAITING
+    action_count: int = 0
+ 
+ 
+# ═══════════════════════════════════════════════════════════════
+# DECK GENERATION
+# ═══════════════════════════════════════════════════════════════
+ 
+FIRST_NAMES = [
+    "Alice", "Bob", "Charlie", "Diana", "Eddie", "Fiona", "George", "Hannah",
+    "Ian", "Julia", "Keith", "Laura", "Mike", "Nancy", "Oscar", "Penny",
+    "Quinn", "Rita", "Steve", "Tina", "Umar", "Vera", "Wayne", "Xena",
+    "Yusuf", "Zara", "Alfie", "Brenda", "Colin", "Doris", "Ernie", "Flora",
+    "Gavin", "Helen", "Ivan", "Janet", "Karl", "Linda", "Mick", "Nora",
+    "Owen", "Pat", "Raj", "Sue", "Tom", "Uma", "Vic", "Wendy",
+    "Archie", "Betty", "Clive", "Debra", "Frank", "Grace", "Hank", "Iris",
+    "Jim", "Kay", "Len", "Mabel", "Ned", "Olive", "Phil", "Rose",
+    "Sid", "Trudy", "Ulf", "Val", "Walt", "Yvonne", "Zack", "Agnes",
+    "Barry", "Cath", "Derek", "Elsie", "Fred", "Gwen", "Hugh", "Ivy",
+    "Jack", "Kim", "Les", "Meg", "Norm", "Opal", "Pete", "Ruth",
+    "Sam", "Tess", "Uri", "Viv", "Will", "Xander", "Yoko", "Zelda",
+]
+ 
+ 
+def _weighted_choice(table):
+    r = random.random()
+    cumulative = 0.0
+    for row in table:
+        cumulative += row[0]
+        if r <= cumulative:
+            return row
+    return table[-1]
+ 
+ 
+def generate_symptom_deck(symptom_type: SymptomType, size: int = None) -> list:
+    if size is None:
+        size = SYMPTOM_DECK_SIZE
+    deck = []
+    for _ in range(size):
+        harm_row = _weighted_choice(SYMPTOM_HARM_TABLE)
+        harm_values = (harm_row[1], harm_row[2], harm_row[3])
+        comp_row = _weighted_choice(SYMPTOM_COMPLICATION_TABLE)
+        complications = [(symptom_type.type_by_offset(off), cnt) for off, cnt in comp_row[1]]
+        deck.append(SymptomCard(symptom_type, harm_values, complications))
+    random.shuffle(deck)
+    return deck
+ 
+ 
+def draw_symptom_card(deck, discard, symptom_type):
+    if not deck:
+        deck.extend(discard)
+        discard.clear()
+        random.shuffle(deck)
+    if not deck:
+        return generate_symptom_deck(symptom_type, 1)[0]
+    card = deck.pop(0)
+    return SymptomCard(card.symptom_type, card.harm_values, list(card.complications))
+ 
+ 
+def generate_patient_deck(total=None):
+    if total is None:
+        total = TOTAL_PATIENTS
+    names = list(FIRST_NAMES)
+    random.shuffle(names)
+    while len(names) < total:
+        names.append(f"Patient #{len(names) + 1}")
+    patients = []
+    severities = [1, 2, 3]
+    sev_probs = [SEVERITY_WEIGHTS[s] for s in severities]
+    stypes = [SymptomType.BLOOD, SymptomType.BONE, SymptomType.BRAIN]
+    for i in range(total):
+        sev = random.choices(severities, weights=sev_probs, k=1)[0]
+        if random.random() < SINGLE_SYMPTOM_RATIO:
+            init_symp = [random.choice(stypes)]
+        elif random.random() < MULTI_SYMPTOM_2_RATIO:
+            init_symp = random.choices(stypes, k=2)
+        else:
+            init_symp = random.choices(stypes, k=3)
+        patients.append(Patient(id=i + 1, name=names[i], severity=sev, initial_symptoms=init_symp))
+    random.shuffle(patients)
+    return patients
+ 
+ 
+# ═══════════════════════════════════════════════════════════════
+# GAME ENGINE
+# ═══════════════════════════════════════════════════════════════
+ 
+class ActionError(Exception):
+    pass
+ 
+ 
+@dataclass
+class GameState:
+    turn: int = 0
+    total_turns: int = TOTAL_TURNS
+    rooms: dict = field(default_factory=dict)
+    players: list = field(default_factory=list)
+    actions_remaining: int = 0
+    patient_deck: list = field(default_factory=list)
+    symptom_decks: dict = field(default_factory=dict)
+    symptom_discards: dict = field(default_factory=dict)
+    all_patients: list = field(default_factory=list)
+    log: list = field(default_factory=list)
+ 
+    @property
+    def shift_hour(self) -> str:
+        h = (SHIFT_START_HOUR + self.turn) % 24
+        if h == 0: return "12:00 AM"
+        if h < 12: return f"{h}:00 AM"
+        if h == 12: return "12:00 PM"
+        return f"{h - 12}:00 PM"
+ 
+    def get_room(self, rt: RoomType) -> Room:
+        return self.rooms[rt]
+ 
+    def find_patient_room(self, patient: Patient) -> Optional[Room]:
+        for room in self.rooms.values():
+            if patient in room.queue:
+                return room
+        return None
+ 
+ 
+def create_game(seed=None):
+    if seed is not None:
+        random.seed(seed)
+    gs = GameState()
+    gs.rooms = {
+        RoomType.WAITING: Room(RoomType.WAITING, capacity=None),
+        RoomType.BLOOD: Room(RoomType.BLOOD, capacity=ROOM_CAPACITY),
+        RoomType.BONE: Room(RoomType.BONE, capacity=ROOM_CAPACITY),
+        RoomType.BRAIN: Room(RoomType.BRAIN, capacity=ROOM_CAPACITY),
+        RoomType.ADMITTANCE: Room(RoomType.ADMITTANCE, capacity=ROOM_CAPACITY),
+    }
+    gs.players = [Player(id=i + 1) for i in range(NUM_PLAYERS)]
+    gs.patient_deck = generate_patient_deck()
+    for st in SymptomType:
+        gs.symptom_decks[st] = generate_symptom_deck(st)
+        gs.symptom_discards[st] = []
+    gs.actions_remaining = NUM_PLAYERS * ACTIONS_PER_PLAYER
+    return gs
 
+ 
+# ── Save / Load ──
+ 
+SAVE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "saves")
+ 
+ 
+def _serialize_symptom_card(card):
+    return {
+        "symptom_type": card.symptom_type.value,
+        "harm_values": list(card.harm_values),
+        "complications": [[t.value, c] for t, c in card.complications],
+        "face_up": card.face_up,
+    }
+ 
+ 
+def _deserialize_symptom_card(d):
+    st = SymptomType(d["symptom_type"])
+    complications = [(SymptomType(t), c) for t, c in d["complications"]]
+    return SymptomCard(
+        symptom_type=st,
+        harm_values=tuple(d["harm_values"]),
+        complications=complications,
+        face_up=d["face_up"],
+    )
+ 
+ 
+def _serialize_patient(patient):
+    return {
+        "id": patient.id,
+        "name": patient.name,
+        "severity": patient.severity,
+        "initial_symptoms": [s.value for s in patient.initial_symptoms],
+        "symptom_cards": [_serialize_symptom_card(c) for c in patient.symptom_cards],
+        "arrival_turn": patient.arrival_turn,
+        "checked_in": patient.checked_in,
+        "current_room": patient.current_room.value if patient.current_room else None,
+        "discharged": patient.discharged,
+        "admitted": patient.admitted,
+        "death_turn": patient.death_turn,
+        "discharge_turn": patient.discharge_turn,
+        "admitted_turn": patient.admitted_turn,
+        "stormed_out": patient.stormed_out,
+        "ready_for_discharge_turn": patient.ready_for_discharge_turn,
+    }
+ 
+ 
+def _deserialize_patient(d):
+    p = Patient(
+        id=d["id"],
+        name=d["name"],
+        severity=d["severity"],
+        initial_symptoms=[SymptomType(s) for s in d["initial_symptoms"]],
+    )
+    p.symptom_cards = [_deserialize_symptom_card(c) for c in d["symptom_cards"]]
+    p.arrival_turn = d["arrival_turn"]
+    p.checked_in = d["checked_in"]
+    p.current_room = RoomType(d["current_room"]) if d["current_room"] else None
+    p.discharged = d["discharged"]
+    p.admitted = d["admitted"]
+    p.death_turn = d["death_turn"]
+    p.discharge_turn = d["discharge_turn"]
+    p.admitted_turn = d["admitted_turn"]
+    p.stormed_out = d["stormed_out"]
+    p.ready_for_discharge_turn = d["ready_for_discharge_turn"]
+    return p
+ 
+ 
+def save_game(gs, active_player_id, slot_name=None):
+    """Save the current game state to a JSON file. Returns the save file path."""
+    os.makedirs(SAVE_DIR, exist_ok=True)
+    if slot_name is None:
+        slot_name = "save"
+    filepath = os.path.join(SAVE_DIR, f"{slot_name}.json")
+ 
+    # Rooms reference patients already in all_patients by ID
+    room_data = {}
+    for rt, room in gs.rooms.items():
+        room_data[rt.value] = {
+            "queue_ids": [p.id for p in room.queue],
+            "capacity": room.capacity,
+        }
+ 
+    data = {
+        "version": "1.6",
+        "turn": gs.turn,
+        "total_turns": gs.total_turns,
+        "actions_remaining": gs.actions_remaining,
+        "active_player_id": active_player_id,
+        "players": [{"id": p.id, "current_room": p.current_room.value,
+                      "action_count": p.action_count} for p in gs.players],
+        "all_patients": [_serialize_patient(p) for p in gs.all_patients],
+        "patient_deck": [_serialize_patient(p) for p in gs.patient_deck],
+        "rooms": room_data,
+        "symptom_decks": {
+            st.value: [_serialize_symptom_card(c) for c in deck]
+            for st, deck in gs.symptom_decks.items()
+        },
+        "symptom_discards": {
+            st.value: [_serialize_symptom_card(c) for c in pile]
+            for st, pile in gs.symptom_discards.items()
+        },
+        "log": gs.log,
+        "random_state": list(random.getstate()[1]),
+        "random_pos": random.getstate()[2],
+    }
+ 
+    with open(filepath, "w") as f:
+        json.dump(data, f, indent=2)
+    return filepath
+ 
+ 
+def load_game(filepath):
+    """Load a game state from a JSON file. Returns (GameState, active_player_id)."""
+    with open(filepath, "r") as f:
+        data = json.load(f)
+ 
+    gs = GameState()
+    gs.turn = data["turn"]
+    gs.total_turns = data["total_turns"]
+    gs.actions_remaining = data["actions_remaining"]
+ 
+    # Restore players
+    gs.players = []
+    for pd in data["players"]:
+        p = Player(id=pd["id"], current_room=RoomType(pd["current_room"]),
+                   action_count=pd["action_count"])
+        gs.players.append(p)
+ 
+    # Restore all_patients (the canonical patient objects)
+    patient_lookup = {}
+    gs.all_patients = []
+    for pd in data["all_patients"]:
+        p = _deserialize_patient(pd)
+        gs.all_patients.append(p)
+        patient_lookup[p.id] = p
+ 
+    # Restore patient_deck (these are separate patient objects not yet in play)
+    gs.patient_deck = []
+    for pd in data["patient_deck"]:
+        p = _deserialize_patient(pd)
+        gs.patient_deck.append(p)
+        patient_lookup[p.id] = p
+ 
+    # Restore rooms — queue references point to the same patient objects
+    gs.rooms = {}
+    for rt in RoomType:
+        rd = data["rooms"][rt.value]
+        room = Room(room_type=rt, capacity=rd["capacity"])
+        for pid in rd["queue_ids"]:
+            room.queue.append(patient_lookup[pid])
+        gs.rooms[rt] = room
+ 
+    # Restore symptom decks and discards
+    gs.symptom_decks = {}
+    gs.symptom_discards = {}
+    for st in SymptomType:
+        gs.symptom_decks[st] = [_deserialize_symptom_card(c)
+                                 for c in data["symptom_decks"][st.value]]
+        gs.symptom_discards[st] = [_deserialize_symptom_card(c)
+                                    for c in data["symptom_discards"][st.value]]
+ 
+    # Restore log
+    gs.log = data["log"]
+ 
+    # Restore random state
+    random_state = (3, tuple(data["random_state"]), data["random_pos"])
+    random.setstate(random_state)
+ 
+    active_player_id = data["active_player_id"]
+    return gs, active_player_id
+ 
+ 
+def list_save_files():
+    """Return a list of (display_name, filepath) for available save files."""
+    if not os.path.isdir(SAVE_DIR):
+        return []
+    saves = []
+    for fname in sorted(os.listdir(SAVE_DIR)):
+        if fname.endswith(".json"):
+            fpath = os.path.join(SAVE_DIR, fname)
+            try:
+                with open(fpath, "r") as f:
+                    data = json.load(f)
+                turn = data.get("turn", "?")
+                total = data.get("total_turns", "?")
+                slot = fname[:-5]  # strip .json
+                saves.append((f"{slot} — Turn {turn}/{total}", fpath))
+            except (json.JSONDecodeError, KeyError):
+                continue
+    return saves
+
+
+def _draw(gs, symptom_type):
+    return draw_symptom_card(gs.symptom_decks[symptom_type],
+                             gs.symptom_discards[symptom_type], symptom_type)
+ 
+ 
+def assign_symptom_cards(gs, patient):
+    for stype in patient.initial_symptoms:
+        patient.symptom_cards.append(_draw(gs, stype))
+ 
+ 
+def _diagnose_card(gs, patient, card):
+    """Flip a card and handle complications. Returns harm value."""
+    card.face_up = True
+    harm = card.harm_for_severity(patient.severity)
+    for comp_type, comp_count in card.complications:
+        for _ in range(comp_count):
+            patient.symptom_cards.append(_draw(gs, comp_type))
+    return harm
+ 
+ 
+def check_patient_deaths(gs):
+    """Track when patients first die (visible cumulative harm >= health)."""
+    for patient in gs.all_patients:
+        if patient.discharged or patient.admitted:
+            continue
+        if patient.death_turn is not None:
+            continue
+        if patient.checked_in and patient.cumulative_harm(gs.turn) >= PATIENT_HEALTH:
+            patient.death_turn = gs.turn
+ 
+ 
+# ── Player Actions ──
+ 
+def action_move(gs, player, target_room):
+    if gs.actions_remaining <= 0:
+        raise ActionError("No actions remaining.")
+    if target_room not in ADJACENT[player.current_room]:
+        raise ActionError(f"Cannot move directly from {player.current_room.value} to "
+                          f"{target_room.value}. Must pass through Waiting Room.")
+    old = player.current_room
+    player.current_room = target_room
+    gs.actions_remaining -= 1
+    player.action_count += 1
+    msg = f"Player {player.id} moved from {old.value} to {target_room.value}."
+    gs.log.append(msg)
+    return msg
+ 
+ 
+def action_check_in(gs, player):
+    if gs.actions_remaining <= 0:
+        raise ActionError("No actions remaining.")
+    if player.current_room != RoomType.WAITING:
+        raise ActionError("Must be in the Waiting Room to check in patients.")
+    waiting = gs.get_room(RoomType.WAITING)
+    target = next((p for p in waiting.queue if not p.checked_in), None)
+    if target is None:
+        raise ActionError("No unchecked patients in the Waiting Room.")
+    target.checked_in = True
+    assign_symptom_cards(gs, target)
+    gs.actions_remaining -= 1
+    player.action_count += 1
+    msg = (f"Player {player.id} checked in {target.name} (Severity {target.severity}, "
+           f"{len(target.symptom_cards)} symptom{'s' if len(target.symptom_cards) != 1 else ''}: "
+           f"{', '.join(c.symptom_type.value for c in target.symptom_cards)}).")
+    gs.log.append(msg)
+    return msg
+ 
+ 
+def action_diagnose(gs, player):
+    """Diagnose up to 2 matching symptom cards on front-of-queue patient."""
+    if gs.actions_remaining <= 0:
+        raise ActionError("No actions remaining.")
+    rt = player.current_room
+    if rt not in ROOM_TO_SYMPTOM:
+        raise ActionError(f"Cannot diagnose in {rt.value}.")
+    stype = ROOM_TO_SYMPTOM[rt]
+    room = gs.get_room(rt)
+    if not room.queue:
+        raise ActionError(f"No patients in {rt.value}.")
+    patient = room.queue[0]
+    if not patient.checked_in:
+        raise ActionError(f"{patient.name} has not been checked in yet.")
+    matching = [c for c in patient.symptom_cards if not c.face_up and c.symptom_type == stype]
+    if not matching:
+        raise ActionError(f"{patient.name} has no undiagnosed {stype.value} symptoms.")
+    # Diagnose up to 2 matching cards
+    diagnosed = []
+    for card in matching[:2]:
+        harm = _diagnose_card(gs, patient, card)
+        diagnosed.append((card, harm))
+    room.remove_patient(patient)
+    gs.get_room(RoomType.WAITING).add_patient(patient)
+    gs.actions_remaining -= 1
+    player.action_count += 1
+    if len(diagnosed) == 1:
+        card, harm = diagnosed[0]
+        msg = (f"Player {player.id} diagnosed {patient.name}'s {stype.value} symptom: "
+               f"harm +{harm} (sev {patient.severity}). {card.complication_text}. "
+               f"Patient returned to Waiting Room.")
+    else:
+        total_harm = sum(h for _, h in diagnosed)
+        comps = "; ".join(c.complication_text for c, _ in diagnosed)
+        msg = (f"Player {player.id} diagnosed 2 of {patient.name}'s {stype.value} symptoms: "
+               f"total harm +{total_harm} (sev {patient.severity}). {comps}. "
+               f"Patient returned to Waiting Room.")
+    gs.log.append(msg)
+    return msg
+ 
+ 
+def action_admit(gs, player):
+    """Transfer front patient out of game from Admittance room."""
+    if gs.actions_remaining <= 0:
+        raise ActionError("No actions remaining.")
+    if player.current_room != RoomType.ADMITTANCE:
+        raise ActionError("Must be in Admittance to transfer patients.")
+    admittance = gs.get_room(RoomType.ADMITTANCE)
+    if not admittance.queue:
+        raise ActionError("No patients in Admittance.")
+    patient = admittance.queue[0]
+    admittance.remove_patient(patient)
+    patient.admitted = True
+    patient.admitted_turn = gs.turn
+    gs.actions_remaining -= 1
+    player.action_count += 1
+    msg = f"Player {player.id} transferred {patient.name} out from Admittance."
+    gs.log.append(msg)
+    return msg
+ 
+ 
+def action_send(gs, player, patient, target_room):
+    if gs.actions_remaining <= 0:
+        raise ActionError("No actions remaining.")
+    current = gs.get_room(player.current_room)
+    if patient not in current.queue:
+        raise ActionError(f"{patient.name} is not in {player.current_room.value}.")
+    # Explicit discharge request (target_room is None)
+    if target_room is None:
+        if not patient.can_discharge:
+            raise ActionError(f"{patient.name} cannot be discharged yet.")
+        current.remove_patient(patient)
+        patient.discharged = True
+        patient.discharge_turn = gs.turn
+        gs.actions_remaining -= 1
+        player.action_count += 1
+        msg = f"Player {player.id} discharged {patient.name} (0 harm, fully diagnosed)."
+        gs.log.append(msg)
+        return msg
+    target = gs.get_room(target_room)
+    if target.is_full:
+        raise ActionError(f"{target_room.value} is full ({target.capacity} patients).")
+    current.remove_patient(patient)
+    target.add_patient(patient)
+    gs.actions_remaining -= 1
+    player.action_count += 1
+    msg = f"Player {player.id} sent {patient.name} to {target_room.value}."
+    gs.log.append(msg)
+    return msg
+ 
+ 
+def action_call(gs, player, patient):
+    if gs.actions_remaining <= 0:
+        raise ActionError("No actions remaining.")
+    player_room = gs.get_room(player.current_room)
+    if player_room.is_full:
+        raise ActionError(f"{player.current_room.value} is full.")
+    source = gs.find_patient_room(patient)
+    if source is None:
+        raise ActionError(f"{patient.name} is not in any room.")
+    if source.room_type == player.current_room:
+        raise ActionError(f"{patient.name} is already in {player.current_room.value}.")
+    source.remove_patient(patient)
+    player_room.add_patient(patient)
+    gs.actions_remaining -= 1
+    player.action_count += 1
+    msg = f"Player {player.id} called {patient.name} from {source.room_type.value} to {player.current_room.value}."
+    gs.log.append(msg)
+    return msg
+ 
+ 
+def action_rearrange(gs, player, new_order):
+    if gs.actions_remaining <= 0:
+        raise ActionError("No actions remaining.")
+    room = gs.get_room(player.current_room)
+    if set(new_order) != set(room.queue):
+        raise ActionError("New order must contain exactly the same patients.")
+    room.queue = list(new_order)
+    gs.actions_remaining -= 1
+    player.action_count += 1
+    msg = f"Player {player.id} rearranged {player.current_room.value} queue: {', '.join(p.name for p in new_order)}."
+    gs.log.append(msg)
+    return msg
+ 
+ 
+# ── Turn Phases ──
+ 
+def phase_arrivals(gs):
+    if gs.turn >= gs.total_turns:
+        return
+    count = ARRIVALS_PER_TURN
+    if ARRIVAL_CURVE is not None:
+        idx = gs.turn - 1
+        if 0 <= idx < len(ARRIVAL_CURVE):
+            count = ARRIVAL_CURVE[idx]
+    waiting = gs.get_room(RoomType.WAITING)
+    arrived = []
+    for _ in range(count):
+        if not gs.patient_deck:
+            break
+        p = gs.patient_deck.pop(0)
+        p.arrival_turn = gs.turn
+        waiting.add_patient(p)
+        gs.all_patients.append(p)
+        arrived.append(p.name)
+    if arrived:
+        gs.log.append(f"New arrivals: {', '.join(arrived)} ({len(arrived)} patients).")
+    else:
+        gs.log.append("No new arrivals (patient deck empty).")
+ 
+ 
+def phase_auto_functions(gs):
+    waiting = gs.get_room(RoomType.WAITING)
+ 
+    # Auto check-in
+    for patient in waiting.queue:
+        if not patient.checked_in:
+            patient.checked_in = True
+            assign_symptom_cards(gs, patient)
+            gs.log.append(f"[Auto] Waiting Room checked in {patient.name} "
+                          f"(Severity {patient.severity}, "
+                          f"{len(patient.symptom_cards)} symptoms: "
+                          f"{', '.join(c.symptom_type.value for c in patient.symptom_cards)}).")
+            break
+ 
+    # Auto diagnose (up to 2 matching symptoms per room)
+    for rt in [RoomType.BLOOD, RoomType.BONE, RoomType.BRAIN]:
+        room = gs.get_room(rt)
+        if not room.queue:
+            continue
+        patient = room.queue[0]
+        if not patient.checked_in:
+            continue
+        stype = ROOM_TO_SYMPTOM[rt]
+        matching = [c for c in patient.symptom_cards if not c.face_up and c.symptom_type == stype]
+        if not matching:
+            continue
+        diagnosed = []
+        for card in matching[:2]:
+            harm = _diagnose_card(gs, patient, card)
+            diagnosed.append((card, harm))
+        room.remove_patient(patient)
+        waiting.add_patient(patient)
+        if len(diagnosed) == 1:
+            card, harm = diagnosed[0]
+            gs.log.append(f"[Auto] {rt.value} diagnosed {patient.name}'s {stype.value}: "
+                          f"harm +{harm}. {card.complication_text}. Returned to Waiting Room.")
+        else:
+            total_harm = sum(h for _, h in diagnosed)
+            gs.log.append(f"[Auto] {rt.value} diagnosed {len(diagnosed)} of {patient.name}'s "
+                          f"{stype.value} symptoms: total harm +{total_harm}. "
+                          f"Returned to Waiting Room.")
+ 
+    # Auto admittance
+    admittance = gs.get_room(RoomType.ADMITTANCE)
+    if admittance.queue:
+        patient = admittance.queue[0]
+        admittance.remove_patient(patient)
+        patient.admitted = True
+        patient.admitted_turn = gs.turn
+        gs.log.append(f"[Auto] Admittance transferred {patient.name} out of the game.")
+ 
+    # Tag newly discharge-ready patients
+    for room in gs.rooms.values():
+        for patient in room.queue:
+            if (patient.checked_in and patient.can_discharge
+                    and patient.ready_for_discharge_turn is None):
+                patient.ready_for_discharge_turn = gs.turn
+ 
+    # Auto storm-out: patients who have waited too long after becoming discharge-ready
+    for room in gs.rooms.values():
+        for patient in list(room.queue):
+            if patient.ready_for_discharge_turn is None:
+                continue
+            if not patient.can_discharge:
+                continue
+            turns_waiting = gs.turn - patient.ready_for_discharge_turn
+            if turns_waiting >= STORM_OUT_TURNS:
+                room.remove_patient(patient)
+                patient.discharged = True
+                patient.stormed_out = True
+                patient.discharge_turn = gs.turn
+                gs.log.append(f"[Auto] {patient.name} stormed out! "
+                              f"(waited {turns_waiting} turns after being ready for discharge)")
+ 
+ 
+def begin_turn(gs):
+    gs.turn += 1
+    gs.actions_remaining = NUM_PLAYERS * ACTIONS_PER_PLAYER
+    gs.log.append(f"\n{'=' * 50}")
+    gs.log.append(f"TURN {gs.turn} of {gs.total_turns} -- {gs.shift_hour}")
+    gs.log.append(f"{'=' * 50}")
+    gs.log.append("Harm tick: all patients accumulate damage.")
+    # Check for newly dead patients after harm tick
+    check_patient_deaths(gs)
+    if gs.turn < gs.total_turns:
+        phase_arrivals(gs)
+    else:
+        gs.log.append("Final turn -- no new arrivals.")
+ 
+ 
+def end_turn(gs):
+    phase_auto_functions(gs)
+    check_patient_deaths(gs)
+ 
+ 
+def resolve_end_of_game(gs):
+    # Check in all remaining
+    for room in gs.rooms.values():
+        for patient in room.queue:
+            if not patient.checked_in:
+                patient.checked_in = True
+                assign_symptom_cards(gs, patient)
+    # Diagnose all (resolve cascades)
+    for _ in range(1000):
+        found = False
+        for patient in gs.all_patients:
+            if patient.discharged or patient.admitted:
+                continue
+            for card in patient.symptom_cards:
+                if not card.face_up:
+                    _diagnose_card(gs, patient, card)
+                    found = True
+                    break
+            if found:
+                break
+        if not found:
+            break
+    # Count deaths
+    deaths, survivors = [], []
+    for patient in gs.all_patients:
+        if patient.discharged or patient.admitted:
+            survivors.append(patient)
+            continue
+        if patient.cumulative_harm_total(gs.total_turns) >= PATIENT_HEALTH:
+            deaths.append(patient)
+        else:
+            survivors.append(patient)
+    return {
+        "deaths": deaths,
+        "death_count": len(deaths),
+        "survivors": survivors,
+        "won": len(deaths) <= DEATH_THRESHOLD,
+        "total_patients": len(gs.all_patients),
+        "discharged": sum(1 for p in gs.all_patients if p.discharged),
+        "admitted": sum(1 for p in gs.all_patients if p.admitted),
+        "stormed_out": sum(1 for p in gs.all_patients if p.stormed_out),
+    }
+ 
+ 
+def get_patient_status(gs, patient):
+    harm = patient.cumulative_harm(gs.turn) if patient.checked_in else 0
+    turns = gs.turn - patient.arrival_turn if patient.arrival_turn else 0
+    return {
+        "name": patient.name,
+        "severity": patient.severity if patient.checked_in else "?",
+        "checked_in": patient.checked_in,
+        "room": patient.current_room.value if patient.current_room else "None",
+        "harm_rate": patient.harm_rate if patient.checked_in else "?",
+        "cumulative_harm": harm,
+        "health": PATIENT_HEALTH,
+        "turns_since_arrival": turns,
+        "symptoms_total": len(patient.symptom_cards) if patient.checked_in else "?",
+        "symptoms_diagnosed": sum(1 for c in patient.symptom_cards if c.face_up) if patient.checked_in else 0,
+        "symptoms_remaining": len(patient.undiagnosed_cards) if patient.checked_in else "?",
+        "fully_diagnosed": patient.is_fully_diagnosed if patient.checked_in else False,
+        "is_dead": harm >= PATIENT_HEALTH if patient.checked_in else False,
+    }
+ 
+ 
+# ═══════════════════════════════════════════════════════════════
+# DISPLAY — Terminal UI with ANSI colors
+# ═══════════════════════════════════════════════════════════════
+ 
+def _enable_windows_ansi():
+    """Enable ANSI escape sequences on Windows 10+."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
+        except Exception:
+            pass
+ 
+ 
+_enable_windows_ansi()
+ 
+RESET = "\033[0m"
+BOLD = "\033[1m"
+DIM = "\033[2m"
+RED = "\033[91m"
+GREEN = "\033[92m"
+YELLOW = "\033[93m"
+BLUE = "\033[94m"
+MAGENTA = "\033[95m"
+CYAN = "\033[96m"
+WHITE = "\033[97m"
+BG_RED = "\033[41m"
+BG_GREEN = "\033[42m"
+ 
+SEV_COLORS = {1: GREEN, 2: YELLOW, 3: RED}
+SYM_COLORS = {SymptomType.BLOOD: RED, SymptomType.BONE: WHITE, SymptomType.BRAIN: MAGENTA}
+ROOM_COLORS = {
+    RoomType.WAITING: CYAN,
+    RoomType.BLOOD: RED,
+    RoomType.BONE: WHITE,
+    RoomType.BRAIN: MAGENTA,
+    RoomType.ADMITTANCE: GREEN,
+}
+SYM_ICONS = {SymptomType.BLOOD: "Bl", SymptomType.BONE: "Bo", SymptomType.BRAIN: "Br"}
+ 
+ 
+def clear_screen():
+    if sys.platform == "win32":
+        os.system("cls")
+    else:
+        print("\033[2J\033[H", end="")
+ 
+ 
+def count_current_deaths(gs):
+    return sum(1 for p in gs.all_patients
+               if not p.discharged and not p.admitted
+               and p.checked_in
+               and p.cumulative_harm(gs.turn) >= PATIENT_HEALTH)
+ 
+ 
+def render_header(gs):
+    turns_left = gs.total_turns - gs.turn
+    progress = gs.turn / gs.total_turns
+    bar_w = 30
+    filled = int(progress * bar_w)
+    bar = "#" * filled + "-" * (bar_w - filled)
+ 
+    print(f"{BOLD}{CYAN}{'=' * 60}{RESET}")
+    print(f"{BOLD}  TRIAGE: THE BOARD GAME -- Night Shift{RESET}")
+    print(f"{CYAN}{'=' * 60}{RESET}")
+    print()
+    print(f"  {BOLD}Hour {gs.turn} of {gs.total_turns}{RESET} -- {BOLD}{gs.shift_hour}{RESET}"
+          f"    {DIM}({turns_left} turn{'s' if turns_left != 1 else ''} remaining){RESET}")
+    print(f"  {DIM}[{bar}]{RESET}")
+    print()
+ 
+    actions = gs.actions_remaining
+    total_actions = NUM_PLAYERS * ACTIONS_PER_PLAYER
+    deaths = count_current_deaths(gs)
+    ac = GREEN if actions > total_actions // 2 else (YELLOW if actions > 2 else RED)
+    dc = GREEN if deaths == 0 else (YELLOW if deaths <= DEATH_THRESHOLD else RED)
+    print(f"  Actions: {ac}{BOLD}{actions}{RESET}/{total_actions}"
+          f"    Deaths: {dc}{BOLD}{deaths}{RESET}/{DEATH_THRESHOLD} threshold"
+          f"    Deck: {len(gs.patient_deck)} patients remaining")
+    print()
+ 
+ 
+def render_patient_line(gs, patient, prefix, detail=True):
+    if not patient.checked_in:
+        print(f"{prefix}{DIM}[???] Unknown patient (face-down){RESET}")
+        return
+    sc = SEV_COLORS[patient.severity]
+    hr = patient.harm_rate
+    ch = patient.cumulative_harm(gs.turn)
+    hp = PATIENT_HEALTH
+    turns = gs.turn - patient.arrival_turn if patient.arrival_turn else 0
+ 
+    is_dead = ch >= hp
+    dead_str = f" {BG_RED}{WHITE}{BOLD} DEAD {RESET}" if is_dead else ""
+ 
+    # Smell check: dead patient in waiting room for 3+ turns
+    smell_str = ""
+    if (is_dead and patient.death_turn is not None
+            and patient.current_room == RoomType.WAITING
+            and gs.turn - patient.death_turn >= 3):
+        smell_str = f"\n         {DIM}{patient.name} is starting to smell...{RESET}"
+ 
+    pct = min(ch / hp, 1.0) if hp > 0 else 0
+    bw = 10
+    bf = int(pct * bw)
+    bc = GREEN if pct < 0.5 else (YELLOW if pct < 0.8 else RED)
+    hbar = f"{bc}{'|' * bf}{DIM}{'.' * (bw - bf)}{RESET}"
+ 
+    status = ""
+    if patient.is_fully_diagnosed:
+        if patient.harm_rate == 0:
+            if patient.ready_for_discharge_turn is not None:
+                turns_left = max(0, STORM_OUT_TURNS - (gs.turn - patient.ready_for_discharge_turn))
+                if turns_left > 0:
+                    status = f"{GREEN}DISCHARGE READY ({turns_left}){RESET}"
+                else:
+                    status = f"{YELLOW}ABOUT TO STORM OUT{RESET}"
+            else:
+                status = f"{GREEN}DISCHARGE READY{RESET}"
+        else:
+            status = f"{YELLOW}NEEDS ADMITTANCE{RESET}"
+ 
+    print(f"{prefix}{BOLD}{patient.name}{RESET} "
+          f"Sev:{sc}{patient.severity}{RESET} HR:{hr} [{hbar}] {ch}/{hp}{dead_str} {status}"
+          f"{smell_str}")
+ 
+    if detail:
+        cards = []
+        for c in patient.symptom_cards:
+            col = SYM_COLORS[c.symptom_type]
+            icon = SYM_ICONS[c.symptom_type]
+            if c.face_up:
+                cards.append(f"{col}[{icon}:+{c.harm_for_severity(patient.severity)}]{RESET}")
+            else:
+                cards.append(f"{col}[{icon}:?]{RESET}")
+        if cards:
+            dc = sum(1 for c in patient.symptom_cards if c.face_up)
+            tc = len(patient.symptom_cards)
+            print(f"         Symptoms ({dc}/{tc}): {' '.join(cards)}  {DIM}(T+{turns}){RESET}")
+ 
+ 
+def render_room(gs, rt, detail=True):
+    room = gs.get_room(rt)
+    c = ROOM_COLORS[rt]
+    cap = f"/{room.capacity}" if room.capacity else ""
+    pstrs = [f"P{p.id}" for p in gs.players if p.current_room == rt]
+    ph = f" [{', '.join(pstrs)}]" if pstrs else ""
+    print(f"  {c}{BOLD}{rt.value}{RESET} ({room.patient_count}{cap}){ph}")
+    if not room.queue:
+        print(f"    {DIM}(empty){RESET}")
+        return
+    for i, patient in enumerate(room.queue):
+        render_patient_line(gs, patient, f"    {i + 1}. ", detail)
+ 
+ 
+def render_map(gs):
+    print(f"  {BOLD}Hospital Map:{RESET}")
+    print()
+    def tag(rt):
+        r = gs.get_room(rt)
+        c = ROOM_COLORS[rt]
+        cap = f"/{r.capacity}" if r.capacity else ""
+        return f"{c}{rt.value}({r.patient_count}{cap}){RESET}"
+    print(f"                    {tag(RoomType.BLOOD)}")
+    print(f"                         |")
+    print(f"    {tag(RoomType.BONE)} -- {tag(RoomType.WAITING)} -- {tag(RoomType.BRAIN)}")
+    print(f"                         |")
+    print(f"                    {tag(RoomType.ADMITTANCE)}")
+    print()
+ 
+ 
+def render_players(gs):
+    print(f"  {BOLD}Players:{RESET}")
+    for p in gs.players:
+        c = ROOM_COLORS[p.current_room]
+        print(f"    Player {p.id}: {c}{p.current_room.value}{RESET}")
+    print()
+ 
+ 
+def render_full_state(gs):
+    clear_screen()
+    render_header(gs)
+    render_map(gs)
+    render_players(gs)
+    print(f"  {BOLD}{'-' * 56}{RESET}")
+    print()
+    for rt in [RoomType.WAITING, RoomType.BLOOD, RoomType.BONE,
+               RoomType.BRAIN, RoomType.ADMITTANCE]:
+        render_room(gs, rt)
+        print()
+    print(f"  {BOLD}{'-' * 56}{RESET}")
+    print()
+ 
+ 
+def render_action_menu(gs, pid):
+    player = gs.players[pid - 1]
+    print(f"  {BOLD}Player {player.id} @ {player.current_room.value}{RESET} "
+          f"({gs.actions_remaining} actions left)")
+    print()
+    print(f"  Actions:")
+    print(f"    {BOLD}m{RESET} - Move to adjacent room")
+    # Contextual room action
+    if player.current_room == RoomType.WAITING:
+        print(f"    {BOLD}d{RESET} - Room action: Check in front patient")
+    elif player.current_room in ROOM_TO_SYMPTOM:
+        print(f"    {BOLD}d{RESET} - Room action: Diagnose front patient (up to 2 symptoms)")
+    elif player.current_room == RoomType.ADMITTANCE:
+        print(f"    {BOLD}d{RESET} - Room action: Transfer front patient out")
+    print(f"    {BOLD}s{RESET} - Send patient to another room / Discharge")
+    print(f"    {BOLD}k{RESET} - Call patient to this room")
+    print(f"    {BOLD}r{RESET} - Rearrange queue in this room")
+    print(f"    {BOLD}p{RESET} - Switch active player")
+    print(f"    {BOLD}e{RESET} - End turn (forfeit remaining actions)")
+    print(f"    {BOLD}x{RESET} - Examine patient details")
+    print(f"    {BOLD}i{RESET} - How to play")
+    print(f"    {BOLD}v{RESET} - Save game")
+    print(f"    {BOLD}q{RESET} - Quit game")
+    print()
+
+def render_title_screen():
+    clear_screen()
+    print()
+    print(f"{BOLD}{CYAN}  ╔══════════════════════════════════════════════════════════╗{RESET}")
+    print(f"{BOLD}{CYAN}  ║{RESET}                                                          {BOLD}{CYAN}║{RESET}")
+    print(f"{BOLD}{CYAN}  ║{RESET}   {RED}{BOLD} _____  ____   ___    _     ____  __{RESET}                 {BOLD}{CYAN}║{RESET}")
+    print(f"{BOLD}{CYAN}  ║{RESET}   {RED}{BOLD}|_   _||  _ \\ |_ _|  / \\   / ___||  ___|{RESET}             {BOLD}{CYAN}║{RESET}")
+    print(f"{BOLD}{CYAN}  ║{RESET}   {RED}{BOLD}  | |  | |_) | | |  / _ \\ | |  _ | |_{RESET}               {BOLD}{CYAN}║{RESET}")
+    print(f"{BOLD}{CYAN}  ║{RESET}   {RED}{BOLD}  | |  |  _ <  | | / ___ \\| |_| ||  _|{RESET}              {BOLD}{CYAN}║{RESET}")
+    print(f"{BOLD}{CYAN}  ║{RESET}   {RED}{BOLD}  |_|  |_| \\_\\|___/_/   \\_\\\\____||____|{RESET}             {BOLD}{CYAN}║{RESET}")
+    print(f"{BOLD}{CYAN}  ║{RESET}                                                          {BOLD}{CYAN}║{RESET}")
+    print(f"{BOLD}{CYAN}  ║{RESET}          {BOLD}T H E   B O A R D   G A M E{RESET}                      {BOLD}{CYAN}║{RESET}")
+    print(f"{BOLD}{CYAN}  ║{RESET}                                                          {BOLD}{CYAN}║{RESET}")
+    print(f"{BOLD}{CYAN}  ╚══════════════════════════════════════════════════════════╝{RESET}")
+    print()
+    print(f"  {DIM}You control {NUM_PLAYERS} staff members working the night shift.{RESET}")
+    print(f"  {DIM}Survive until 8:00 AM with no more than {DEATH_THRESHOLD} deaths.{RESET}")
+    print(f"  {DIM}Each turn you have {NUM_PLAYERS * ACTIONS_PER_PLAYER} actions to share between your team.{RESET}")
+    print()
+    saves = list_save_files()
+    print(f"  {BOLD}[N]{RESET} New Game    {BOLD}[I]{RESET} Instructions    {BOLD}[Q]{RESET} Quit")
+    if saves:
+        print(f"  {BOLD}[L]{RESET} Load Game")
+    print()
+ 
+ 
+def render_how_to_play():
+    clear_screen()
+    print(f"{BOLD}{CYAN}{'=' * 60}{RESET}")
+    print(f"{BOLD}  HOW TO PLAY TRIAGE{RESET}")
+    print(f"{CYAN}{'=' * 60}{RESET}")
+    print()
+    print(f"  {BOLD}GOAL{RESET}")
+    print(f"  Survive a 12-hour night shift in A&E (8 PM to 8 AM).")
+    print(f"  If more than {DEATH_THRESHOLD} patients die, you lose.")
+    print()
+    print(f"  {BOLD}TURN STRUCTURE{RESET}")
+    print(f"  Each turn represents 1 hour:")
+    print(f"    1. {YELLOW}Harm tick{RESET} — all patients accumulate damage")
+    print(f"    2. {CYAN}Arrivals{RESET} — new patients enter the Waiting Room")
+    print(f"    3. {GREEN}Player actions{RESET} — {NUM_PLAYERS * ACTIONS_PER_PLAYER} actions shared between {NUM_PLAYERS} staff")
+    print(f"    4. {MAGENTA}Room auto-functions{RESET} — rooms process their front patient")
+    print()
+    print(f"  {BOLD}PLAYER ACTIONS{RESET}")
+    print(f"    {BOLD}m{RESET} - Move       Move to an adjacent room (hub-and-spoke layout)")
+    print(f"    {BOLD}d{RESET} - Room action Depends on your room:")
+    print(f"                    Waiting Room → check in front patient")
+    print(f"                    Blood/Bone/Brain → diagnose up to 2 matching symptoms")
+    print(f"                    Admittance → transfer front patient out of the game")
+    print(f"    {BOLD}s{RESET} - Send       Send a patient to another room or discharge them")
+    print(f"    {BOLD}k{RESET} - Call       Call a patient from another room to yours")
+    print(f"    {BOLD}r{RESET} - Rearrange  Reorder the queue in your current room")
+    print(f"    {BOLD}p{RESET} - Switch     Switch which player you're controlling")
+    print(f"    {BOLD}e{RESET} - End turn   Forfeit remaining actions")
+    print()
+    print(f"  {BOLD}PATIENTS{RESET}")
+    print(f"  Each patient has a severity (1-3) and symptom cards.")
+    print(f"    Severity 1 ({GREEN}green{RESET}) — mild, low harm per symptom")
+    print(f"    Severity 2 ({YELLOW}yellow{RESET}) — moderate harm")
+    print(f"    Severity 3 ({RED}red{RESET}) — critical, high harm per symptom")
+    print(f"  Patients accumulate harm each turn based on their diagnosed")
+    print(f"  symptom cards. If harm reaches {PATIENT_HEALTH}, they die.")
+    print()
+    print(f"  {BOLD}DIAGNOSIS{RESET}")
+    print(f"  Diagnosing flips up to 2 matching symptom cards in a room.")
+    print(f"  Some cards cause complications — adding new undiagnosed symptoms.")
+    print(f"  After diagnosis, the patient returns to the Waiting Room.")
+    print()
+    print(f"  {BOLD}HOSPITAL LAYOUT (hub-and-spoke){RESET}")
+    print(f"                    Blood Room")
+    print(f"                         |")
+    print(f"    Bone Room -- Waiting Room -- Brain Room")
+    print(f"                         |")
+    print(f"                    Admittance")
+    print(f"  All rooms connect through the Waiting Room.")
+    print()
+    print(f"  {BOLD}ROOM AUTO-FUNCTIONS (end of each turn){RESET}")
+    print(f"  - Waiting Room: checks in 1 unchecked patient")
+    print(f"  - Blood/Bone/Brain: diagnoses up to 2 matching symptoms on front patient")
+    print(f"  - Admittance: transfers front patient out of the game")
+    print()
+    print(f"  {BOLD}DISCHARGE{RESET}")
+    print(f"  Fully diagnosed patients with 0 harm rate are tagged DISCHARGE READY.")
+    print(f"  You can discharge them with the send action (s).")
+    print(f"  If not discharged within {STORM_OUT_TURNS} turns, they storm out on their own.")
+    print()
+    print(f"  {BOLD}ENDGAME AUDIT{RESET}")
+    print(f"  When the shift ends, all remaining patients are fully assessed.")
+    print(f"  Any whose total harm exceeds {PATIENT_HEALTH} are counted as dead.")
+    print()
+    print(f"  {BOLD}WIN / LOSE{RESET}")
+    print(f"  {GREEN}Win{RESET}: {DEATH_THRESHOLD} or fewer deaths across the whole game + audit.")
+    print(f"  {RED}Lose{RESET}: More than {DEATH_THRESHOLD} deaths total.")
+    print()
+    print(f"  {DIM}Press Enter to return...{RESET}")
+    input()
+ 
+ 
+def compute_statistics(gs, result):
+    """Compute detailed end-of-game statistics."""
+    stats = {}
+ 
+    # Total patients arrived
+    stats['total_arrived'] = len(gs.all_patients)
+ 
+    # Discharged
+    discharged = [p for p in gs.all_patients if p.discharged]
+    stats['discharged_count'] = len(discharged)
+    if discharged:
+        waits = [(p.discharge_turn - p.arrival_turn) for p in discharged
+                 if p.discharge_turn and p.arrival_turn]
+        stats['discharged_avg_wait'] = sum(waits) / len(waits) if waits else 0
+    else:
+        stats['discharged_avg_wait'] = 0
+    stats['stormed_out'] = sum(1 for p in discharged if p.stormed_out)
+ 
+    # Admitted & transferred
+    admitted = [p for p in gs.all_patients if p.admitted]
+    stats['admitted_count'] = len(admitted)
+    if admitted:
+        waits = [(p.admitted_turn - p.arrival_turn) for p in admitted
+                 if p.admitted_turn and p.arrival_turn]
+        stats['admitted_avg_wait'] = sum(waits) / len(waits) if waits else 0
+    else:
+        stats['admitted_avg_wait'] = 0
+ 
+    # Handed over to next shift (remaining, alive)
+    death_set = set(id(p) for p in result['deaths'])
+    handed_over = [p for p in gs.all_patients
+                   if not p.discharged and not p.admitted and id(p) not in death_set]
+    stats['handed_over'] = len(handed_over)
+ 
+    # Deaths: in-game vs audit
+    in_game = [p for p in result['deaths'] if p.death_turn is not None]
+    audit = [p for p in result['deaths'] if p.death_turn is None]
+    stats['total_deaths'] = len(result['deaths'])
+    stats['in_game_deaths'] = len(in_game)
+    stats['audit_deaths'] = len(audit)
+ 
+    # Longest wait
+    longest_patient = None
+    longest_wait = 0
+    for p in gs.all_patients:
+        if p.arrival_turn is None:
+            continue
+        end = p.discharge_turn or p.admitted_turn or gs.total_turns
+        wait = end - p.arrival_turn
+        if wait > longest_wait:
+            longest_wait = wait
+            longest_patient = p
+    stats['longest_wait_patient'] = longest_patient
+    stats['longest_wait_turns'] = longest_wait
+ 
+    # Closest call (survived but highest harm)
+    closest_patient = None
+    closest_harm = 0
+    for p in gs.all_patients:
+        if id(p) in death_set:
+            continue
+        harm = p.cumulative_harm_total(gs.total_turns)
+        if harm > closest_harm and harm < PATIENT_HEALTH:
+            closest_harm = harm
+            closest_patient = p
+    stats['closest_call_patient'] = closest_patient
+    stats['closest_call_harm'] = closest_harm
+ 
+    # Sickest patient (most symptom cards total)
+    sickest = None
+    most_cards = 0
+    for p in gs.all_patients:
+        total_cards = len(p.symptom_cards)
+        if total_cards > most_cards:
+            most_cards = total_cards
+            sickest = p
+    stats['sickest_patient'] = sickest
+    stats['sickest_cards'] = most_cards
+ 
+    # Busiest doctor
+    busiest = max(gs.players, key=lambda p: p.action_count)
+    stats['busiest_player'] = busiest
+    stats['busiest_actions'] = busiest.action_count
+ 
+    return stats
+ 
+ 
+def render_statistics(stats):
+    """Display end-of-game statistics block."""
+    print(f"  {BOLD}End-of-Shift Statistics{RESET}")
+    print(f"  {'-' * 50}")
+    print(f"  Total patients arrived:       {stats['total_arrived']}")
+ 
+    d_avg = f" (avg {stats['discharged_avg_wait']:.1f} turns)" if stats['discharged_count'] else ""
+    print(f"  Patients discharged:          {stats['discharged_count']}{d_avg}")
+    if stats['stormed_out'] > 0:
+        print(f"    of which stormed out:       {stats['stormed_out']}")
+ 
+    a_avg = f" (avg {stats['admitted_avg_wait']:.1f} turns)" if stats['admitted_count'] else ""
+    print(f"  Patients admitted/transferred: {stats['admitted_count']}{a_avg}")
+ 
+    print(f"  Handed over to next shift:    {stats['handed_over']}")
+ 
+    dc = RED if stats['total_deaths'] > DEATH_THRESHOLD else GREEN
+    print(f"  Total deaths:                 {dc}{BOLD}{stats['total_deaths']}{RESET}"
+          f"  ({stats['in_game_deaths']} during shift, {stats['audit_deaths']} found in audit)")
+    print()
+ 
+    lp = stats['longest_wait_patient']
+    if lp:
+        print(f"  {BOLD}Longest wait:{RESET}    {lp.name} — {stats['longest_wait_turns']} turns in the system")
+ 
+    cp = stats['closest_call_patient']
+    if cp:
+        print(f"  {BOLD}Closest call:{RESET}    {cp.name} — "
+              f"{stats['closest_call_harm']}/{PATIENT_HEALTH} harm (survived)")
+ 
+    sp = stats['sickest_patient']
+    if sp:
+        print(f"  {BOLD}Sickest patient:{RESET} {sp.name} — {stats['sickest_cards']} symptom cards")
+ 
+    bp = stats['busiest_player']
+    print(f"  {BOLD}Busiest doctor:{RESET}  Player {bp.id} — {stats['busiest_actions']} actions used")
+    print()
+ 
+ 
+def render_family_letter(patient_name):
+    """Display the family letter for the lose screen."""
+    today = date.today().strftime("%d %B %Y")
+    print(f"  {DIM}{'─' * 50}{RESET}")
+    print()
+    print(f"  {DIM}{today}{RESET}")
+    print()
+    print(f"  To Whom It May Concern,")
+    print()
+    print(f"  We are writing on behalf of the family of {BOLD}{patient_name}{RESET},")
+    print(f"  who died yesterday whilst under the care of the Triage")
+    print(f"  Centre.")
+    print()
+    print(f"  We believe that the care provided to {BOLD}{patient_name}{RESET} fell")
+    print(f"  drastically below an acceptable standard, and that this")
+    print(f"  failure directly contributed to their death.")
+    print()
+    print(f"  We intend to pursue with great vigour and fervency, a")
+    print(f"  claim of clinical negligence against the staff who stood")
+    print(f"  by and did nothing.")
+    print()
+    print(f"  We request that all medical records, notes, and")
+    print(f"  documentation relating to {BOLD}{patient_name}{RESET}'s care be")
+    print(f"  preserved and made available upon request.")
+    print()
+    print(f"  {BOLD}You better have a very, very good lawyer.{RESET}")
+    print()
+    print(f"  Faithfully")
+    print(f"  {BOLD}Jon{RESET}")
+    print()
+    print(f"  {DIM}{'─' * 50}{RESET}")
+    print()
+ 
+ 
+def render_audit_sequence(gs):
+    """Show dramatic patient-by-patient audit at end of game."""
+    # Get remaining patients (not yet discharged/admitted)
+    remaining = [p for p in gs.all_patients if not p.discharged and not p.admitted]
+ 
+    clear_screen()
+    print(f"{BOLD}{CYAN}{'=' * 60}{RESET}")
+    print(f"{BOLD}  END-OF-SHIFT AUDIT{RESET}")
+    print(f"{CYAN}{'=' * 60}{RESET}")
+    print()
+    print(f"  The next shift has arrived. Time to hand over.")
+    print(f"  {len(remaining)} patient{'s' if len(remaining) != 1 else ''} remain"
+          f" in the system and must be fully assessed.")
+    print()
+    input(f"  Press Enter to begin the audit...")
+    print()
+ 
+    for p in remaining:
+        # Check in if needed
+        if not p.checked_in:
+            p.checked_in = True
+            assign_symptom_cards(gs, p)
+ 
+        # Diagnose all remaining cards
+        for _ in range(100):
+            undiag = [c for c in p.symptom_cards if not c.face_up]
+            if not undiag:
+                break
+            _diagnose_card(gs, p, undiag[0])
+ 
+        total_harm = p.cumulative_harm_total(gs.total_turns)
+        is_dead = total_harm >= PATIENT_HEALTH
+ 
+        sc = SEV_COLORS.get(p.severity, WHITE)
+        if is_dead:
+            status = f"{BG_RED}{WHITE}{BOLD} DEAD {RESET}"
+        else:
+            status = f"{BG_GREEN}{WHITE}{BOLD} SURVIVED {RESET}"
+ 
+        print(f"  {BOLD}{p.name}{RESET} (Sev {sc}{p.severity}{RESET})"
+              f"  Total harm: {total_harm}/{PATIENT_HEALTH}  ...  {status}")
+        time.sleep(0.6)
+ 
+    print()
+    input(f"  Press Enter to see the final report...")
+ 
+ 
+def render_end_of_game(gs, result):
+    stats = compute_statistics(gs, result)
+ 
+    clear_screen()
+    print(f"{BOLD}{CYAN}{'=' * 60}{RESET}")
+ 
+    if result["won"]:
+        # ── Win Screen ──
+        print(f"{BOLD}  CONGRATULATIONS — YOU SURVIVED YOUR SHIFT!{RESET}")
+        print(f"{CYAN}{'=' * 60}{RESET}")
+        print()
+        print(f"  {BG_GREEN}{WHITE}{BOLD} VICTORY {RESET}")
+        print()
+        print(f"  {DIM}Clearly things aren't too bad in this part of the country.{RESET}")
+        print(f"  {DIM}Your funding has been reduced.{RESET}")
+        print()
+        render_statistics(stats)
+        print(f"  {DIM}Press Enter to play again.{RESET}")
+        print(f"{CYAN}{'=' * 60}{RESET}")
+ 
+    else:
+        # ── Lose Screen ──
+        print(f"{BOLD}  GAME OVER{RESET}")
+        print(f"{CYAN}{'=' * 60}{RESET}")
+        print()
+ 
+        # Family letter — about the last patient who died during the game
+        in_game_dead = [p for p in result['deaths'] if p.death_turn is not None]
+        if in_game_dead:
+            last_dead = max(in_game_dead, key=lambda p: p.death_turn)
+            render_family_letter(last_dead.name)
+        elif result['deaths']:
+            render_family_letter(result['deaths'][-1].name)
+ 
+        render_statistics(stats)
+        print(f"  {DIM}Press Enter to play TRIBUNAL: Medical Defence{RESET}")
+        print(f"{CYAN}{'=' * 60}{RESET}")
+ 
+    input()
+ 
+ 
+# ═══════════════════════════════════════════════════════════════
+# INTERACTIVE MODE
+# ═══════════════════════════════════════════════════════════════
+ 
+ROOM_SHORTCUTS = {
+    "w": RoomType.WAITING, "waiting": RoomType.WAITING,
+    "bl": RoomType.BLOOD, "blood": RoomType.BLOOD,
+    "bo": RoomType.BONE, "bone": RoomType.BONE,
+    "br": RoomType.BRAIN, "brain": RoomType.BRAIN,
+    "a": RoomType.ADMITTANCE, "admittance": RoomType.ADMITTANCE, "ad": RoomType.ADMITTANCE,
+}
+ 
+ 
+def input_room(prompt):
+    print(f"  Room choices: {DIM}(w)aiting, (bl)ood, (bo)ne, (br)ain, (a)dmittance  |  c = cancel{RESET}")
+    while True:
+        choice = input(f"  {prompt}: ").strip().lower()
+        if choice == "c":
+            return None
+        if choice in ROOM_SHORTCUTS:
+            return ROOM_SHORTCUTS[choice]
+        print(f"  {RED}Invalid room. Try: w, bl, bo, br, a  |  c = cancel{RESET}")
+ 
+ 
+def input_patient(prompt, patients):
+    if not patients:
+        print(f"  {RED}No patients available.{RESET}")
+        return None
+    print(f"  Available patients:  {DIM}(c = cancel){RESET}")
+    for i, p in enumerate(patients):
+        st = f"Sev {p.severity}" if p.checked_in else "???"
+        rm = p.current_room.value if p.current_room else "?"
+        print(f"    {i + 1}. {p.name} ({st}) @ {rm}")
+    while True:
+        choice = input(f"  {prompt} (number or name, c = cancel): ").strip()
+        if choice.lower() == "c":
+            return None
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(patients):
+                return patients[idx]
+        except ValueError:
+            pass
+        for p in patients:
+            if choice.lower() in p.name.lower():
+                return p
+        print(f"  {RED}Invalid choice. Try again or press c to cancel.{RESET}")
+ 
+ 
+def run_interactive(seed=None):
+       # Title screen menu loop
+    while True:
+        render_title_screen()
+        choice = input(f"  > ").strip().lower()
+        if choice == "n":
+            break
+        elif choice == "i":
+            render_how_to_play()
+        elif choice == "l":
+            saves = list_save_files()
+            if not saves:
+                print(f"  {RED}No saved games found.{RESET}")
+                continue
+            print()
+            print(f"  {BOLD}Saved Games:{RESET}")
+            for i, (label, _) in enumerate(saves):
+                print(f"    {BOLD}{i + 1}.{RESET} {label}")
+            print()
+            sel = input(f"  Load which save? (number, c = cancel): ").strip().lower()
+            if sel == "c":
+                continue
+            try:
+                idx = int(sel) - 1
+                if 0 <= idx < len(saves):
+                    _, fpath = saves[idx]
+                    gs, active = load_game(fpath)
+                    print(f"  {GREEN}Game loaded! Resuming at turn {gs.turn}...{RESET}")
+                    time.sleep(1)
+                    break
+                else:
+                    print(f"  {RED}Invalid choice.{RESET}")
+            except (ValueError, Exception) as e:
+                print(f"  {RED}Could not load save: {e}{RESET}")    
+        elif choice == "q":
+            print("  Goodbye.")
+            return
+        else:
+           print(f"  {RED}Choose N, I, L, or Q.{RESET}")
+ 
+    # Start a new game or resume a loaded one
+    loaded = choice == "l"
+    if not loaded:
+        gs = create_game(seed=seed)
+        active = 1
+ 
+    # If loaded, resume the current turn's action phase first
+    resume_mid_turn = loaded and gs.actions_remaining > 0
+    start_turn = gs.turn if resume_mid_turn else (gs.turn + 1 if loaded else 1)
+ 
+    for turn in range(start_turn, gs.total_turns + 1):
+        if resume_mid_turn and turn == gs.turn:
+            # Resuming mid-turn: skip begin_turn, just show state and continue actions
+            render_full_state(gs)
+        else:
+            begin_turn(gs)
+            render_full_state(gs)
+ 
+        while gs.actions_remaining > 0:
+            render_action_menu(gs, active)
+            player = gs.players[active - 1]
+            choice = input(f"  > ").strip().lower()
+            action_taken = False
+ 
+            if choice == "m":
+                adj = ADJACENT[player.current_room]
+                print(f"  Adjacent rooms: {', '.join(r.value for r in adj)}")
+                target = input_room("Move to")
+                if target is not None:
+                    try:
+                        msg = action_move(gs, player, target)
+                        print(f"  {GREEN}{msg}{RESET}")
+                        action_taken = True
+                    except ActionError as e:
+                        print(f"  {RED}{e}{RESET}")
+                else:
+                    print(f"  {DIM}Cancelled.{RESET}")
+ 
+            elif choice == "d":
+                # Universal room action
+                if player.current_room == RoomType.WAITING:
+                    try:
+                        msg = action_check_in(gs, player)
+                        print(f"  {GREEN}{msg}{RESET}")
+                        action_taken = True
+                    except ActionError as e:
+                        print(f"  {RED}{e}{RESET}")
+                elif player.current_room in ROOM_TO_SYMPTOM:
+                    try:
+                        msg = action_diagnose(gs, player)
+                        print(f"  {GREEN}{msg}{RESET}")
+                        action_taken = True
+                    except ActionError as e:
+                        print(f"  {RED}{e}{RESET}")
+                elif player.current_room == RoomType.ADMITTANCE:
+                    try:
+                        msg = action_admit(gs, player)
+                        print(f"  {GREEN}{msg}{RESET}")
+                        action_taken = True
+                    except ActionError as e:
+                        print(f"  {RED}{e}{RESET}")
+                else:
+                    print(f"  {RED}No room action available here.{RESET}")
+ 
+            elif choice == "s":
+                room = gs.get_room(player.current_room)
+                if not room.queue:
+                    print(f"  {RED}No patients in this room.{RESET}")
+                else:
+                    pat = input_patient("Send which patient", room.queue)
+                    if pat is None:
+                        print(f"  {DIM}Cancelled.{RESET}")
+                    elif pat.can_discharge:
+                        yn = input(f"  {pat.name} can be discharged (0 harm). "
+                                   f"Discharge? (y/n, c = cancel): ").strip().lower()
+                        if yn == "y":
+                            try:
+                                print(f"  {GREEN}{action_send(gs, player, pat, None)}{RESET}")
+                                action_taken = True
+                            except ActionError as e:
+                                print(f"  {RED}{e}{RESET}")
+                        elif yn == "c":
+                            print(f"  {DIM}Cancelled.{RESET}")
+                        else:
+                            target = input_room("Send to which room")
+                            if target is not None:
+                                try:
+                                    print(f"  {GREEN}{action_send(gs, player, pat, target)}{RESET}")
+                                    action_taken = True
+                                except ActionError as e:
+                                    print(f"  {RED}{e}{RESET}")
+                            else:
+                                print(f"  {DIM}Cancelled.{RESET}")
+                    else:
+                        target = input_room("Send to which room")
+                        if target is not None:
+                            try:
+                                print(f"  {GREEN}{action_send(gs, player, pat, target)}{RESET}")
+                                action_taken = True
+                            except ActionError as e:
+                                print(f"  {RED}{e}{RESET}")
+                        else:
+                            print(f"  {DIM}Cancelled.{RESET}")
+ 
+            elif choice == "k":
+                others = [p for r in gs.rooms.values()
+                          if r.room_type != player.current_room for p in r.queue]
+                if not others:
+                    print(f"  {RED}No patients in other rooms to call.{RESET}")
+                else:
+                    pat = input_patient("Call which patient", others)
+                    if pat is not None:
+                        try:
+                            print(f"  {GREEN}{action_call(gs, player, pat)}{RESET}")
+                            action_taken = True
+                        except ActionError as e:
+                            print(f"  {RED}{e}{RESET}")
+                    else:
+                        print(f"  {DIM}Cancelled.{RESET}")
+ 
+            elif choice == "r":
+                room = gs.get_room(player.current_room)
+                if len(room.queue) <= 1:
+                    print(f"  {RED}Not enough patients to rearrange.{RESET}")
+                else:
+                    print(f"  Current queue in {player.current_room.value}:")
+                    for i, p in enumerate(room.queue):
+                        st = f"Sev {p.severity}" if p.checked_in else "???"
+                        print(f"    {i + 1}. {p.name} ({st})")
+                    print(f"  Enter new order as numbers separated by spaces "
+                          f"(e.g., '3 1 2'), or c to cancel:")
+                    try:
+                        raw = input("  New order: ").strip()
+                        if raw.lower() == "c":
+                            print(f"  {DIM}Cancelled.{RESET}")
+                        else:
+                            indices = [int(x) - 1 for x in raw.split()]
+                            if sorted(indices) == list(range(len(room.queue))):
+                                new_order = [room.queue[i] for i in indices]
+                                print(f"  {GREEN}{action_rearrange(gs, player, new_order)}{RESET}")
+                                action_taken = True
+                            else:
+                                print(f"  {RED}Must include each position exactly once.{RESET}")
+                    except (ValueError, IndexError) as e:
+                        print(f"  {RED}Invalid input: {e}{RESET}")
+                    except ActionError as e:
+                        print(f"  {RED}{e}{RESET}")
+ 
+            elif choice == "p":
+                print(f"  Players: {', '.join(f'P{p.id} @ {p.current_room.value}' for p in gs.players)}")
+                try:
+                    raw = input("  Switch to player # (c = cancel): ").strip()
+                    if raw.lower() == "c":
+                        print(f"  {DIM}Cancelled.{RESET}")
+                    else:
+                        pid = int(raw)
+                        if 1 <= pid <= len(gs.players):
+                            active = pid
+                            print(f"  {GREEN}Now controlling Player {pid}.{RESET}")
+                        else:
+                            print(f"  {RED}Invalid player number.{RESET}")
+                except ValueError:
+                    print(f"  {RED}Invalid input.{RESET}")
+ 
+            elif choice == "e":
+                if input("  End turn and forfeit remaining actions? (y/n): ").strip().lower() == "y":
+                    gs.actions_remaining = 0
+ 
+            elif choice == "x":
+                all_p = [p for r in gs.rooms.values() for p in r.queue]
+                if not all_p:
+                    print(f"  {RED}No patients to examine.{RESET}")
+                else:
+                    pat = input_patient("Examine which patient", all_p)
+                    if pat is not None:
+                        s = get_patient_status(gs, pat)
+                        print(f"\n  {BOLD}=== {pat.name} ==={RESET}")
+                        print(f"  Severity: {s['severity']}")
+                        print(f"  Room: {s['room']}")
+                        print(f"  Arrived: Turn {pat.arrival_turn} ({s['turns_since_arrival']} turns ago)")
+                        print(f"  Harm Rate: {s['harm_rate']}")
+                        print(f"  Cumulative Harm: {s['cumulative_harm']} / {s['health']}")
+                        print(f"  Symptoms: {s['symptoms_diagnosed']}/{s['symptoms_total']} diagnosed")
+                        print(f"  Fully Diagnosed: {s['fully_diagnosed']}")
+                        if pat.ready_for_discharge_turn is not None:
+                            tw = gs.turn - pat.ready_for_discharge_turn
+                            tl = max(0, STORM_OUT_TURNS - tw)
+                            print(f"  Discharge Ready: Yes ({tl} turns until storms out)")
+                        if pat.checked_in:
+                            print(f"  Symptom Cards:")
+                            for card in pat.symptom_cards:
+                                if card.face_up:
+                                    print(f"    [{card.symptom_type.value}] DIAGNOSED: "
+                                          f"harm +{card.harm_for_severity(pat.severity)}, "
+                                          f"{card.complication_text}")
+                                else:
+                                    print(f"    [{card.symptom_type.value}] Undiagnosed")
+                        print()
+                    else:
+                        print(f"  {DIM}Cancelled.{RESET}")
+                        
+            elif choice == "i":
+                render_how_to_play()
+                render_full_state(gs)
+ 
+            elif choice == "v":
+                try:
+                    path = save_game(gs, active)
+                    print(f"  {GREEN}Game saved successfully!{RESET}")
+                    print(f"  {DIM}({path}){RESET}")
+                except Exception as e:
+                    print(f"  {RED}Save failed: {e}{RESET}")
+ 
+            elif choice == "q":
+                if input("  Quit the game? (y/n): ").strip().lower() == "y":
+                    print("  Game abandoned.")
+                    return
+            else:
+                print(f"  {RED}Unknown action. Use m/d/s/k/r/p/e/x/i/v/q.{RESET}")
+ 
+            if action_taken:
+                render_full_state(gs)
+ 
+        # End of turn
+        print(f"\n  {BOLD}End of turn -- room auto-functions activating...{RESET}")
+        log_before = len(gs.log)
+        end_turn(gs)
+        for entry in gs.log[log_before:]:
+            if entry.startswith("[Auto]"):
+                print(f"  {YELLOW}{entry}{RESET}")
+        print(f"\n  Press Enter to continue to next turn...")
+        input()
+ 
+        # End-of-game audit sequence (dramatic patient-by-patient tally)
+    render_audit_sequence(gs)
+    result = resolve_end_of_game(gs)
+    render_end_of_game(gs, result)
+ 
+ 
+# ═══════════════════════════════════════════════════════════════
+# AI PLAYER
+# ═══════════════════════════════════════════════════════════════
+ 
+def get_priority_symptom(patient):
+    counts = {}
+    for c in patient.symptom_cards:
+        if not c.face_up:
+            counts[c.symptom_type] = counts.get(c.symptom_type, 0) + 1
+    return max(counts, key=counts.get) if counts else None
+ 
+ 
+def ai_decide_action(gs, player_idx):
+    player = gs.players[player_idx]
+ 
+    # Priority 1: Discharge / admit fully diagnosed in current room
+    room = gs.get_room(player.current_room)
+    for pat in list(room.queue):
+        if not pat.checked_in or not pat.is_fully_diagnosed:
+            continue
+        if pat.can_discharge:
+            try:
+                action_send(gs, player, pat, None)
+                return True
+            except ActionError:
+                pass
+        elif pat.needs_admittance and not gs.get_room(RoomType.ADMITTANCE).is_full:
+            try:
+                action_send(gs, player, pat, RoomType.ADMITTANCE)
+                return True
+            except ActionError:
+                pass
+ 
+    # Priority 2: Room action in current room
+    if player.current_room in ROOM_TO_SYMPTOM:
+        stype = ROOM_TO_SYMPTOM[player.current_room]
+        dr = gs.get_room(player.current_room)
+        if dr.queue:
+            front = dr.queue[0]
+            if front.checked_in and any(not c.face_up and c.symptom_type == stype
+                                        for c in front.symptom_cards):
+                try:
+                    action_diagnose(gs, player)
+                    return True
+                except ActionError:
+                    pass
+    elif player.current_room == RoomType.ADMITTANCE:
+        admittance = gs.get_room(RoomType.ADMITTANCE)
+        if admittance.queue:
+            try:
+                action_admit(gs, player)
+                return True
+            except ActionError:
+                pass
+ 
+    # Priority 3: Route patients from waiting room
+    if player.current_room == RoomType.WAITING:
+        waiting = gs.get_room(RoomType.WAITING)
+        for pat in list(waiting.queue):
+            if not pat.checked_in or not pat.is_fully_diagnosed:
+                continue
+            if pat.can_discharge:
+                try:
+                    action_send(gs, player, pat, None)
+                    return True
+                except ActionError:
+                    pass
+            elif pat.needs_admittance and not gs.get_room(RoomType.ADMITTANCE).is_full:
+                try:
+                    action_send(gs, player, pat, RoomType.ADMITTANCE)
+                    return True
+                except ActionError:
+                    pass
+        for pat in list(waiting.queue):
+            if not pat.checked_in or pat.is_fully_diagnosed:
+                continue
+            pt = get_priority_symptom(pat)
+            if pt and not gs.get_room(SYMPTOM_TO_ROOM[pt]).is_full:
+                try:
+                    action_send(gs, player, pat, SYMPTOM_TO_ROOM[pt])
+                    return True
+                except ActionError:
+                    pass
+        if any(not p.checked_in for p in waiting.queue):
+            try:
+                action_check_in(gs, player)
+                return True
+            except ActionError:
+                pass
+ 
+    # Priority 4: Move to most useful room
+    best_room, best_score = None, -1
+    for tt in [RoomType.WAITING, RoomType.BLOOD, RoomType.BONE,
+               RoomType.BRAIN, RoomType.ADMITTANCE]:
+        score = 0
+        if tt == RoomType.WAITING:
+            w = gs.get_room(RoomType.WAITING)
+            score = (sum(1 for p in w.queue if not p.checked_in) * 3 +
+                     sum(1 for p in w.queue if p.checked_in and not p.is_fully_diagnosed) * 2 +
+                     sum(1 for p in w.queue if p.checked_in and p.is_fully_diagnosed) * 4)
+        elif tt in ROOM_TO_SYMPTOM:
+            dr = gs.get_room(tt)
+            score = sum(p.severity * 2 for p in dr.queue if p.checked_in)
+            st = ROOM_TO_SYMPTOM[tt]
+            w = gs.get_room(RoomType.WAITING)
+            score += sum(p.severity for p in w.queue
+                         if p.checked_in and any(not c.face_up and c.symptom_type == st
+                                                  for c in p.symptom_cards))
+        elif tt == RoomType.ADMITTANCE:
+            ad = gs.get_room(RoomType.ADMITTANCE)
+            score = len(ad.queue) * 3
+        players_there = sum(1 for pl in gs.players if pl.current_room == tt)
+        if tt == player.current_room:
+            score -= 5
+        score -= players_there * 2
+        if score > best_score:
+            best_score, best_room = score, tt
+ 
+    if best_room and best_room != player.current_room:
+        if best_room in ADJACENT[player.current_room]:
+            try:
+                action_move(gs, player, best_room)
+                return True
+            except ActionError:
+                pass
+        elif player.current_room != RoomType.WAITING:
+            try:
+                action_move(gs, player, RoomType.WAITING)
+                return True
+            except ActionError:
+                pass
+ 
+    # Priority 5: Rearrange queues
+    room = gs.get_room(player.current_room)
+    if len(room.queue) >= 2:
+        checked = [p for p in room.queue if p.checked_in]
+        if len(checked) >= 2:
+            sq = sorted(room.queue, key=lambda p: (
+                -p.severity if p.checked_in else 0,
+                -p.cumulative_harm(gs.turn) if p.checked_in else 0))
+            if sq != room.queue:
+                try:
+                    action_rearrange(gs, player, sq)
+                    return True
+                except ActionError:
+                    pass
+ 
+    return False
+ 
+ 
+def ai_play_turn(gs):
+    limit = gs.actions_remaining * 3
+    for _ in range(limit):
+        if gs.actions_remaining <= 0:
+            break
+        if not any(ai_decide_action(gs, i) for i in range(len(gs.players))):
+            break
+ 
+ 
+# ═══════════════════════════════════════════════════════════════
+# SIMULATION MODE
+# ═══════════════════════════════════════════════════════════════
+ 
+def run_single_game(seed=None, verbose=False):
+    gs = create_game(seed=seed)
+    for turn in range(1, gs.total_turns + 1):
+        begin_turn(gs)
+        if verbose:
+            print(f"  Turn {turn}: {len(gs.all_patients)} patients, "
+                  f"WR={gs.get_room(RoomType.WAITING).patient_count}, "
+                  f"BL={gs.get_room(RoomType.BLOOD).patient_count}, "
+                  f"BO={gs.get_room(RoomType.BONE).patient_count}, "
+                  f"BR={gs.get_room(RoomType.BRAIN).patient_count}, "
+                  f"AD={gs.get_room(RoomType.ADMITTANCE).patient_count}")
+        ai_play_turn(gs)
+        end_turn(gs)
+    result = resolve_end_of_game(gs)
+    if verbose:
+        print(f"  Result: {'WIN' if result['won'] else 'LOSS'} -- {result['death_count']} deaths, "
+              f"{result['discharged']} discharged, {result['admitted']} admitted")
+    return result
+ 
+ 
+def run_simulation(num_games=100, base_seed=None, verbose=False):
+    if base_seed is None:
+        base_seed = random.randint(0, 999999)
+    wins = 0
+    deaths_list, discharged_list, admitted_list, patients_list, stormed_list = [], [], [], [], []
+ 
+    print(f"\nTRIAGE: The Board Game -- Simulation Mode")
+    print(f"{'=' * 50}")
+    print(f"  Games: {num_games}")
+    print(f"  Settings: {NUM_PLAYERS} players, {ACTIONS_PER_PLAYER} actions each, {TOTAL_TURNS} turns")
+    print(f"  Arrivals: curve {ARRIVAL_CURVE}, Health: {PATIENT_HEALTH}, "
+          f"Death threshold: {DEATH_THRESHOLD}")
+    print(f"  Base seed: {base_seed}")
+    print(f"{'=' * 50}")
+ 
+    for i in range(num_games):
+        r = run_single_game(seed=base_seed + i, verbose=verbose)
+        if r["won"]:
+            wins += 1
+        deaths_list.append(r["death_count"])
+        discharged_list.append(r["discharged"])
+        admitted_list.append(r["admitted"])
+        patients_list.append(r["total_patients"])
+        stormed_list.append(r["stormed_out"])
+        if (i + 1) % 10 == 0 or i == num_games - 1:
+            sys.stdout.write(f"\r  Progress: {i + 1}/{num_games} "
+                             f"({(i + 1) / num_games * 100:.0f}%)")
+            sys.stdout.flush()
+ 
+    print("\n")
+    avg_d = sum(deaths_list) / len(deaths_list)
+    wr = wins / num_games * 100
+    dd = {}
+    for d in deaths_list:
+        dd[d] = dd.get(d, 0) + 1
+ 
+    print(f"Results:")
+    print(f"{'-' * 50}")
+    print(f"  Win rate:           {wr:.1f}% ({wins}/{num_games})")
+    print(f"  Avg deaths:         {avg_d:.2f}")
+    print(f"  Death range:        {min(deaths_list)}-{max(deaths_list)}")
+    print(f"  Avg discharged:     {sum(discharged_list) / len(discharged_list):.2f}")
+    print(f"  Avg admitted:       {sum(admitted_list) / len(admitted_list):.2f}")
+    print(f"  Avg stormed out:    {sum(stormed_list) / len(stormed_list):.2f}")
+    print(f"  Avg total patients: {sum(patients_list) / len(patients_list):.1f}")
+    print()
+    print(f"  Death distribution:")
+    for d in sorted(dd):
+        cnt = dd[d]
+        bar = '#' * (cnt * 40 // num_games)
+        marker = " <-- threshold" if d == DEATH_THRESHOLD else ""
+        print(f"    {d:2d} deaths: {bar} {cnt / num_games * 100:.1f}% ({cnt}){marker}")
+    print()
+    if wr > 60:
+        print(f"  -> Game may be too easy. Consider: more arrivals, less health, fewer actions.")
+    elif wr < 20:
+        print(f"  -> Game may be too hard. Consider: fewer arrivals, more health, more actions.")
+    elif 30 <= wr <= 50:
+        print(f"  -> Difficulty looks good! Most games are close.")
+    else:
+        print(f"  -> Difficulty is in a reasonable range. Fine-tune with variables above.")
+ 
+ 
+# ═══════════════════════════════════════════════════════════════
+# MAIN ENTRY POINT
+# ═══════════════════════════════════════════════════════════════
+ 
+def main():
+    global NUM_PLAYERS, ACTIONS_PER_PLAYER, TOTAL_TURNS, ARRIVALS_PER_TURN
+    global PATIENT_HEALTH, DEATH_THRESHOLD, ROOM_CAPACITY
+ 
+    parser = argparse.ArgumentParser(
+        description="TRIAGE: The Board Game -- Digital Simulation",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python triage.py                         Interactive mode
+  python triage.py --mode simulate         Run 100 simulated games
+  python triage.py --mode simulate -n 500  Run 500 simulated games
+  python triage.py --seed 42               Reproducible game
+  python triage.py --mode simulate -v      Verbose simulation
+""",
+    )
+    parser.add_argument("--mode", choices=["interactive", "simulate"], default="interactive")
+    parser.add_argument("-n", "--num-games", type=int, default=100)
+    parser.add_argument("-s", "--seed", type=int, default=None)
+    parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument("--players", type=int, default=None)
+    parser.add_argument("--actions", type=int, default=None)
+    parser.add_argument("--turns", type=int, default=None)
+    parser.add_argument("--arrivals", type=int, default=None)
+    parser.add_argument("--health", type=int, default=None)
+    parser.add_argument("--deaths", type=int, default=None)
+    parser.add_argument("--capacity", type=int, default=None)
+    args = parser.parse_args()
+ 
+    if args.players is not None:
+        NUM_PLAYERS = args.players
+    if args.actions is not None:
+        ACTIONS_PER_PLAYER = args.actions
+    if args.turns is not None:
+        TOTAL_TURNS = args.turns
+    if args.arrivals is not None:
+        ARRIVALS_PER_TURN = args.arrivals
+    if args.health is not None:
+        PATIENT_HEALTH = args.health
+    if args.deaths is not None:
+        DEATH_THRESHOLD = args.deaths
+    if args.capacity is not None:
+        ROOM_CAPACITY = args.capacity
+ 
+    if args.mode == "interactive":
+        run_interactive(seed=args.seed)
+    else:
+        run_simulation(num_games=args.num_games, base_seed=args.seed, verbose=args.verbose)
+ 
+ 
+if __name__ == "__main__":
+    main()
