@@ -367,17 +367,15 @@ def create_game(seed=None, late_for_work=False):
         # Simulate turn 1: arrivals only (no harm tick, no auto functions yet)
         gs.turn = 1
         phase_arrivals(gs)
-        # Simulate turn 2: arrivals
-        gs.turn = 2
-        phase_arrivals(gs)
         # Auto-check-in: simulate the waiting room auto-function checking in one patient
         waiting = gs.get_room(RoomType.WAITING)
         if waiting.queue and not waiting.queue[0].checked_in:
             patient = waiting.queue[0]
             patient.checked_in = True
             assign_symptom_cards(gs, patient)
-        # Reset turn to 1 so the first begin_turn call increments it to 2
-        gs.turn = 1
+        # Reset turn to 0 so the first begin_turn call increments it to 1
+        # (then phase_arrivals for turn 1 fires again, giving 8 total patients)
+        gs.turn = 0
 
     return gs
 
