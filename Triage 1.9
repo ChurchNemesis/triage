@@ -762,7 +762,7 @@ def action_rearrange(gs, player, new_order):
     if gs.actions_remaining <= 0:
         raise ActionError("No actions remaining.")
     room = gs.get_room(player.current_room)
-    if set(new_order) != set(room.queue):
+    if sorted(p.id for p in new_order) != sorted(p.id for p in room.queue):
         raise ActionError("New order must contain exactly the same patients.")
     room.queue = list(new_order)
     gs.actions_remaining -= 1
@@ -1860,7 +1860,7 @@ def run_interactive(seed=None):
                                 action_taken = True
                             else:
                                 print(f"  {RED}Must include each position exactly once.{RESET}")
-                    except (ValueError, IndexError) as e:
+                    except (ValueError, IndexError, TypeError) as e:
                         print(f"  {RED}Invalid input: {e}{RESET}")
                     except ActionError as e:
                         print(f"  {RED}{e}{RESET}")
