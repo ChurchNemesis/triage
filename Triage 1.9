@@ -1677,19 +1677,63 @@ TUTORIAL_PROMPT = f"{CYAN}"
 TUTORIAL_PROMPT_END = RESET
 
 
-def tutorial_rae(text):
+def tutorial_rae(text, wait=True):
     """Print a line of Rae's dialogue."""
     print(f"  {RAE}\"{text}\"{RAE_END}")
+    if wait:
+        input()
 
 
-def tutorial_rae_raw(text):
+def tutorial_rae_raw(text, wait=True):
     """Print Rae's dialogue without quotes (for stage directions etc)."""
     print(f"  {RAE}{text}{RAE_END}")
+    if wait:
+        input()
 
 
-def tutorial_narrative(text):
+def tutorial_narrative(text, wait=True):
     """Print narrative/descriptive text."""
     print(f"  {NARRATIVE}{text}{NARRATIVE_END}")
+    if wait:
+        input()
+
+
+def barry_says(text, wait=True):
+    print(f"  {BOLD}Barry:{RESET} \"{text}\"")
+    if wait:
+        input()
+
+
+def steve_says(text, wait=True):
+    print(f"  {BOLD}Steve:{RESET} \"{text}\"")
+    if wait:
+        input()
+
+
+AUTO_RESOLVE = "AUTO_RESOLVE"
+
+
+def tutorial_wait_key_escalating(required, responses, final_behavior="repeat"):
+    idx = 0
+    while True:
+        choice = input(f"  > ").strip().lower()
+        if choice == required:
+            return None
+        if idx < len(responses):
+            speaker, text = responses[idx]
+            if speaker == AUTO_RESOLVE:
+                print(f"  {BOLD}{text}{RESET}")
+                input()
+                return AUTO_RESOLVE
+            speaker(text)
+            idx += 1
+        elif final_behavior == "repeat" and responses:
+            speaker, text = responses[-1]
+            if speaker == AUTO_RESOLVE:
+                return AUTO_RESOLVE
+            speaker(text)
+        else:
+            print(f"  {DIM}In the tutorial, press {BOLD}{required}{RESET}{DIM} to continue.{RESET}")
 
 
 def tutorial_enter(prompt_text):
@@ -1853,84 +1897,82 @@ def run_tutorial():
     """Run the full tutorial mode."""
 
     # ══════════════════════════════════════════════════════════
-    # INTRO SEQUENCE — cinematic text, one line at a time
+    # INTRO — Phase 1: Bus narrative
     # ══════════════════════════════════════════════════════════
     clear_screen()
     print()
     print()
 
-    intro_lines = [
-        (NARRATIVE, "It's cold. The bus is full."),
-        (NARRATIVE, ""),
-        (NARRATIVE, "You are about to start your first shift."),
-        (NARRATIVE, ""),
-        (NARRATIVE, "You feel unwell."),
-        (NARRATIVE, ""),
-        (NARRATIVE, "Is that irony? Or just bad luck."),
-        (NARRATIVE, ""),
-        (NARRATIVE, "You trained for this. This is what you were born to do, you are going to love this job. You are going to have to love this job."),
-        (NARRATIVE, ""),
-        (NARRATIVE, "It's what you were born to do."),
-    ]
+    tutorial_narrative("It's cold. The bus is full.")
+    tutorial_narrative("You are about to start your first shift at the hospital.")
+    tutorial_narrative("You feel unwell.")
+    tutorial_narrative("Is that irony? Or just bad luck.")
+    tutorial_narrative("You trained for this.")
+    tutorial_narrative("This is what you were born to do, you are going to love this job.")
+    print(f"  {YELLOW}You are going to have to love this job.{RESET}")
+    input()
+    print(f"  {RED}It's what you were born to do.{RESET}")
+    input()
 
-    for style, line in intro_lines:
-        if line == "":
-            print()
-        else:
-            print(f"  {style}{line}{RESET}")
-            input()
+    # ── Page break ──
+    clear_screen()
+    print()
+
+    # ══════════════════════════════════════════════════════════
+    # INTRO — Phase 2: Rae's welcome (before game view)
+    # ══════════════════════════════════════════════════════════
+    tutorial_rae("You've arrived, thank God! What a day I've had! Look at me… I'm going to need at least two showers to get all this off…")
+    tutorial_rae("Are you new? I'm Rae, I'm the Senior Nurse Practitioner for about 60 more seconds and then I'm outta here.")
+    tutorial_rae("You what?")
+    tutorial_rae("Your first shift…ever?")
+    tutorial_rae("Oh god! Well, umm…")
+    tutorial_rae("I'm supposed to be going to my son's birthday party.")
+    tutorial_rae("He's going to be 8 and a half.")
+    tutorial_rae("…")
+    tutorial_rae("He cries when he's sad, I can't bear it…")
+    tutorial_rae_raw("*sigh*")
+    tutorial_rae("Ok then. Follow me, let's get you orientated.")
 
     # ── Create tutorial game state ──
     gs, steve, noor, barry, meg, horris = create_tutorial_game()
 
-    # Show the game screen
+    # ── Transition to game view ──
+    clear_screen()
     render_full_state(gs)
 
-    # Rae's intro dialogue
-    rae_intro = [
-        "You've arrived, thank God! What a day I've had! Look at me... I'm going to need at least two showers to get all this off...",
-        "Are you new? I'm Rae, I'm the Senior Nurse Practitioner for about 60 more seconds and then I'm outta here.",
-        "You what?",
-        "Your first shift...ever?",
-        "Oh god! Well, umm...",
-        "I'm supposed to be going to my son's birthday party.",
-        "He's going to be 8 and a half.",
-        "He cries when he's sad, I can't bear it...",
-        "...",
-    ]
-    for line in rae_intro:
-        tutorial_rae(line)
-        input()
-
-    tutorial_rae_raw("*sigh*")
-    input()
-
-    rae_intro2 = [
-        "Ok then. Follow me, lets get you orientated.",
-        "You're going to be overseeing 3 staff members. I'll just show you how to work with one and then you can figure the rest out.",
-        "You can only designate 12 actions to your staff members per hour. So use them wisely.",
-        "Your shift is 12 hours long. Coffee is your friend.",
-        "Ready?",
-    ]
-    for line in rae_intro2:
-        tutorial_rae(line)
-        input()
-
+    tutorial_rae("You're going to be overseeing 3 staff members. I'll just show you how to work with one and then you can figure the rest out.")
+    tutorial_rae("You can only designate 12 actions to your staff members per hour. So use them wisely.")
+    tutorial_rae("Your shift is 12 hours long. Coffee is your friend.")
+    tutorial_rae("Ready?")
     tutorial_enter("Press Enter to nod")
+
+    # Track which player the tutorial uses (can change in Step 4)
+    active_idx = 0
 
     # ══════════════════════════════════════════════════════════
     # STEP 1: Check in — Room action in Waiting Room
     # ══════════════════════════════════════════════════════════
     render_full_state(gs)
-    tutorial_rae("You can see from your list of patients that one of them is not checked in, hence the [???].")
+    tutorial_rae("Right. You are administrating this hospital ok? You need to make sure everything runs smoothly")
+    tutorial_rae("The problem is that they just haven't updated the software in here since Windows 94")
+    tutorial_rae("It's really important that you continue to not laugh. The patients much prefer professionalism. Right..")
+    tutorial_rae("You can see from the 'Medical staff on shift' board that they are all currently in the Waiting Room")
+    tutorial_rae("By default you'll be controlling whoever is top of that list for you at the moment. In this case they have sadly all forgotten to sign in properly so it's Staff Member 1 for the moment")
+    tutorial_rae("Just above that is a map of the hospital. It's got a relatively minimalist aesthetic and I actually like it if you must know.")
+    tutorial_rae("You can see from your list of patients that two of them are not checked in, hence the [???]. We don't know who they are or what's going on with them.")
+    tutorial_rae("Each room has an action that staff can do in it. The room action of the waiting room is 'check patient in' so, while we're here. It might be a good idea to do that? What do you think?")
     tutorial_rae("Press d to use the Waiting Room's room action: check in the front patient.")
     print()
 
-    tutorial_wait_key("d")
+    # Wrong input: same message every time
+    while True:
+        choice = input(f"  > ").strip().lower()
+        if choice == "d":
+            break
+        tutorial_rae("Oop, that's ok, happens to the best of us. Try again.")
 
     # Perform check-in on Steve with pre-set symptom card
     steve.checked_in = True
-    # Assign a pre-set Blood card for Steve: harm +1 at sev1, no complications
     steve_blood = SymptomCard(
         symptom_type=SymptomType.BLOOD,
         harm_values=(1, 1, 2),
@@ -1939,14 +1981,18 @@ def run_tutorial():
     )
     steve.symptom_cards = [steve_blood]
     gs.actions_remaining -= 1
-    gs.players[0].action_count += 1
-    gs.log.append(f"Player 1 checked in Steve (Severity 1, 1 symptom: Blood).")
+    gs.players[active_idx].action_count += 1
+    gs.log.append(f"Player {gs.players[active_idx].id} checked in Steve (Severity 1, 1 symptom: Blood).")
 
     render_full_state(gs)
-    print(f"  {GREEN}Player 1 checked in Steve (Severity 1, 1 symptom: Blood).{RESET}")
+    print(f"  {GREEN}Player {gs.players[active_idx].id} checked in Steve (Severity 1, 1 symptom: Blood).{RESET}")
     print()
 
-    tutorial_rae("Ok Steve-o what's your story? Looks like it's severity 1, so the lowest category of severity. He's got a blood symptom that needs looking at. We've had to make a lot of changes because of the Ministry for the Administration of Cost-Effectiveness (MACE) recently so he'll have to visit the combined haematology and dermatological breaches room. Or, as I like to call it: the Blood Room.")
+    tutorial_rae("Ok Steve-o what's your story? Looks like it's severity 1, so the category of least concern.")
+    tutorial_rae("Good.")
+    tutorial_rae("He's got a blood symptom that needs looking at.")
+    tutorial_rae("We've had to make a lot of changes because of the Ministry for the Administration of Cost-Effectiveness (MACE) recently so he'll have to visit the combined haematology and dermatological breaches room.")
+    tutorial_rae("Or, as I like to call it: the Blood Room.")
     tutorial_rae("Please tell me that you are following because otherwise I will scream.")
     tutorial_enter("Press Enter to nod unconvincingly")
 
@@ -1954,36 +2000,98 @@ def run_tutorial():
     # STEP 2: Explain the queue and identify priorities
     # ══════════════════════════════════════════════════════════
     render_full_state(gs)
-    tutorial_rae("Right. Lets take a look at who's here.")
-    print()
-    tutorial_rae("Steve (Sev 1) -- just checked in, needs Blood diagnosis.")
-    tutorial_rae("Noor (Sev 1) -- already fully diagnosed, with no harm at all. He's marked DISCHARGE READY, so can leave whenever. You'll need to tell him that he's free to go at some point. It's a bad look to have healthy patients just sitting around everywhere.")
-    tutorial_rae("Barry (Sev 3) -- two undiagnosed symptoms (Blood and Bone). Severity 3 means his symptoms will likely have more underlying harm when diagnosed. He's your die-er, you leave him out too long you're screwed mate.")
-    tutorial_rae("Meg (Sev 2) -- fully diagnosed but due to the harm we've found in her diagnosis and the time she's been sitting around she's a third of the way to clocking out completely. It's not urgent, urgent, but she needs to be admitted to the hospital. We need to send her to Admittance and the hospital porters will take her at the end of the hour.")
-    print()
+    tutorial_rae("Right. Let's take a look at who's here.")
+    tutorial_rae("Steve (Sev 1) — just checked in, needs Blood diagnosis.")
+    tutorial_rae("Noor (Sev 1) — already fully diagnosed, with no harm at all. He's marked DISCHARGE READY, so can leave whenever. You'll need to tell him that he's free to go at some point. It's a bad look to have healthy patients just sitting around everywhere.")
+    tutorial_rae("Barry (Sev 3) — two undiagnosed symptoms (Blood and Bone). Severity 3 means his symptoms will likely have more underlying harm when diagnosed. He's your die-er, you leave him out too long you're screwed mate.")
+    tutorial_rae("Meg (Sev 2) — fully diagnosed but due to the harm we've found in her diagnosis and the time she's been sitting around she's a third of the way to clocking out completely. It's not urgent, urgent, but she needs to be admitted to the hospital. We need to send her to Admittance and the hospital porters will take her at the end of the hour.")
+    tutorial_rae("And then we've got our [???] mystery person, who we're going to leave alone for a bit creepy as they are right now. Room actions happen automatically at the end of each hour so we'll know who they are soon enough without having to waste an action. Just try not to look at them, that's what I do. Blaugh, gives me the willies.")
     tutorial_rae("Let's deal with Baz first though. Get him to the Blood Room to figure out what's going on in there.")
-    tutorial_enter("Press Enter to write \"Barry\" in your notebook")
+    tutorial_enter("Press Enter to write the word \"Barry\" in your notebook")
 
     # ══════════════════════════════════════════════════════════
     # STEP 3: Send Barry to the Blood Room
     # ══════════════════════════════════════════════════════════
     render_full_state(gs)
-    tutorial_rae("To send press s for shout at the top of your lungs.")
+    tutorial_rae("To 'send' a patient, press s for 'shout at the top of your lungs'")
     print()
 
     tutorial_wait_key("s")
 
-    # Patient selection
+    # Patient selection with escalation
     print()
     tutorial_rae("Now decide whose name you're going to shout. I suggest Barry.")
     room_patients = [p for p in gs.get_room(RoomType.WAITING).queue if p.checked_in]
-    pat = tutorial_wait_patient(["barry"], "Send which patient", room_patients)
+    print(f"  Available patients:")
+    for i, p in enumerate(room_patients):
+        st = f"Sev {p.severity}" if p.checked_in else "???"
+        rm = p.current_room.value if p.current_room else "?"
+        print(f"    {i + 1}. {p.name} ({st}) @ {rm}")
+
+    wrong_count = 0
+    barry_auto_resolved = False
+    while True:
+        choice = input(f"  Send which patient: ").strip()
+        # Check if Barry was selected
+        selected_barry = False
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(room_patients) and room_patients[idx].name.lower() == "barry":
+                selected_barry = True
+        except ValueError:
+            pass
+        if not selected_barry:
+            for p in room_patients:
+                if p.name.lower() == "barry" and choice.lower() in p.name.lower():
+                    selected_barry = True
+                    break
+        if selected_barry:
+            break
+
+        wrong_count += 1
+        # Resolve wrong name for [NAME] substitution
+        wrong_name = choice.upper()
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(room_patients):
+                wrong_name = room_patients[idx].name.upper()
+        except ValueError:
+            for p in room_patients:
+                if choice.lower() in p.name.lower():
+                    wrong_name = p.name.upper()
+                    break
+
+        if wrong_count == 1:
+            tutorial_rae(f"SORRY NO, SIT DOWN {wrong_name} PLEASE, I KNOW YOU ARE ALL VERY SICK BUT I'M TRAINING A NEW STAFF MEMBER HERE.")
+            tutorial_rae("… would you like to try again?")
+        elif wrong_count == 2:
+            tutorial_rae("RIGHT, EVERYONE REMAIN SEATED. BARRY YOU'RE ON STANDBY BUT I DO NOT WANT ANY ONE TO MOVE UNTIL OUR NEW ADMINISTRATOR HAS MANAGED TO CALL BARRYS NAME")
+            tutorial_rae("… would you like to try again?")
+        elif wrong_count == 3:
+            tutorial_rae("Nearly there, that was very, very close that time.")
+            tutorial_rae("… would you like to try again?")
+        elif wrong_count == 4:
+            barry_says("Was that Barry? I think I heard Barry?")
+        else:
+            barry_says("BARRY… Yeah I definitely heard it that time. Coming right now")
+            barry_auto_resolved = True
+            break
 
     # Room selection
     print()
     tutorial_rae("Now tell him where to go. I suggest bl for Blood Room.")
     print(f"  Room choices: {DIM}(w)aiting, (bl)ood, (bo)ne, (br)ain, (a)dmittance{RESET}")
-    tutorial_wait_choice(["bl"], "Send to which room")
+    room_wrong = 0
+    while True:
+        room_choice = input(f"  Send to which room: ").strip().lower()
+        if room_choice == "bl":
+            break
+        room_wrong += 1
+        if room_wrong == 1:
+            tutorial_rae("BARRY COME BACK! Good Lord! BARRY! Sorry Barry but my colleague here has made an error, the room you actually need to go to is…")
+            tutorial_rae("Go on… tell him…")
+        else:
+            print(f"  {DIM}In the tutorial, press {BOLD}bl{RESET}{DIM} to continue.{RESET}")
 
     # Execute the send
     waiting = gs.get_room(RoomType.WAITING)
@@ -1991,17 +2099,17 @@ def run_tutorial():
     waiting.remove_patient(barry)
     blood.add_patient(barry)
     gs.actions_remaining -= 1
-    gs.players[0].action_count += 1
-    gs.log.append(f"Player 1 sent Barry to Blood Room.")
+    gs.players[active_idx].action_count += 1
+    gs.log.append(f"Player {gs.players[active_idx].id} sent Barry to Blood Room.")
 
     render_full_state(gs)
-    print(f"  {GREEN}Player 1 sent Barry to Blood Room.{RESET}")
+    print(f"  {GREEN}Player {gs.players[active_idx].id} sent Barry to Blood Room.{RESET}")
     print()
 
-    tutorial_rae("Ok Barry's in the Blood Room, but there's no-one there to diagnose him. So... say it with me now...")
+    tutorial_rae("Ok Barry's in the Blood Room, but there's no-one there to diagnose him. So… say it with me now…")
     tutorial_rae("You're going to have to do it.")
     tutorial_rae("It's just coldbrew coffee in this hipflask ok? Don't want you spreading rumours.")
-    tutorial_enter("Press Enter to not give away that you can smell otherwise")
+    tutorial_enter("Press Enter to pretend that you can't smell otherwise")
 
     # ══════════════════════════════════════════════════════════
     # STEP 4: Move to the Blood Room
@@ -2010,28 +2118,49 @@ def run_tutorial():
     tutorial_rae("OK, lets work those legs. Press m to move.")
     print()
 
-    tutorial_wait_key("m")
+    # Wrong input: two lines, same every time
+    while True:
+        choice = input(f"  > ").strip().lower()
+        if choice == "m":
+            break
+        tutorial_rae("…Hello?…")
+        tutorial_rae("I know its called the waiting room but that titles not really for you…")
 
-    # Player selection
+    # Player selection — allows picking any player
     print()
     tutorial_rae("The first one. Tell them to go.")
     print(f"  Players: {', '.join(f'P{p.id} @ {p.current_room.value}' for p in gs.players)}")
-    tutorial_wait_choice(["1"], "Which player to move")
+    valid_players = [str(p.id) for p in gs.players]
+    player_choice = tutorial_wait_choice(valid_players, "Which player to move")
+    chosen_idx = int(player_choice) - 1
+    if chosen_idx != 0:
+        tutorial_rae("Oh wow, didn't know I was sharing the space with an anarchist. James Dean's here now is he? Che bloody Guevara's come out to play has he?")
+        tutorial_rae("Have it your way")
+        active_idx = chosen_idx
 
     # Room selection
     print()
     tutorial_rae("I shouldn't need to remind you where it is they need to go right?")
     print(f"  Room choices: {DIM}(w)aiting, (bl)ood, (bo)ne, (br)ain, (a)dmittance{RESET}")
-    tutorial_wait_choice(["bl"], "Move to")
+    room_wrong = 0
+    while True:
+        room_choice = input(f"  Move to: ").strip().lower()
+        if room_choice == "bl":
+            break
+        room_wrong += 1
+        if room_wrong == 1:
+            tutorial_rae("I really shouldn't…")
+        else:
+            print(f"  {DIM}In the tutorial, press {BOLD}bl{RESET}{DIM} to continue.{RESET}")
 
     # Execute the move
-    gs.players[0].current_room = RoomType.BLOOD
+    gs.players[active_idx].current_room = RoomType.BLOOD
     gs.actions_remaining -= 1
-    gs.players[0].action_count += 1
-    gs.log.append(f"Player 1 moved from Waiting Room to Blood Room.")
+    gs.players[active_idx].action_count += 1
+    gs.log.append(f"Player {gs.players[active_idx].id} moved from Waiting Room to Blood Room.")
 
     render_full_state(gs)
-    print(f"  {GREEN}Player 1 moved from Waiting Room to Blood Room.{RESET}")
+    print(f"  {GREEN}Player {gs.players[active_idx].id} moved from Waiting Room to Blood Room.{RESET}")
     print()
 
     tutorial_rae("Ok nice. All the right people in all the right places.")
@@ -2052,9 +2181,9 @@ def run_tutorial():
     tutorial_wait_key("d")
 
     # Execute pre-set diagnosis: Barry's Blood symptom
-    barry_blood = barry.symptom_cards[0]  # The Blood card
+    barry_blood = barry.symptom_cards[0]
     barry_blood.face_up = True
-    harm = barry_blood.harm_for_severity(barry.severity)  # +2 at sev 3
+    harm = barry_blood.harm_for_severity(barry.severity)
 
     # Pre-set cascade: add 1x Brain symptom
     barry_brain_cascade = SymptomCard(
@@ -2069,18 +2198,18 @@ def run_tutorial():
     blood.remove_patient(barry)
     waiting.add_patient(barry)
     gs.actions_remaining -= 1
-    gs.players[0].action_count += 1
-    gs.log.append(f"Player 1 diagnosed Barry's Blood symptom: harm +{harm} (sev 3). +1 Brain. Patient returned to Waiting Room.")
+    gs.players[active_idx].action_count += 1
+    gs.log.append(f"Player {gs.players[active_idx].id} diagnosed Barry's Blood symptom: harm +{harm} (sev 3). +1 Brain. Patient returned to Waiting Room.")
 
     render_full_state(gs)
-    print(f"  {GREEN}Player 1 diagnosed Barry's Blood symptom: harm +{harm} (sev 3). +1 Brain. Patient returned to Waiting Room.{RESET}")
+    print(f"  {GREEN}Player {gs.players[active_idx].id} diagnosed Barry's Blood symptom: harm +{harm} (sev 3). +1 Brain. Patient returned to Waiting Room.{RESET}")
     print()
 
     tutorial_rae("Pissing hell Barry!!")
     tutorial_rae("OK, so Barry's back in the waiting room after his diagnosis, the bad news is that we've uncovered some underlying harm. So that's two per hour that are just going to keep adding up for every turn he's in here. If that hits 36 he's a goner so keep an eye on his chart.")
     tutorial_rae("The other bad news is that in our diagnosis we've also picked up a complication. There was something neurological that we hadn't picked up yet and we're going to have to deal with in the Brain Room which is what I call our combined Neurology and Psychiatry ward.")
     tutorial_rae("So there's that, plus what might be a fracture that will need diagnosis. Guess what I call the musculoskeletal, orthopaedics and rheumatology room..?")
-    tutorial_enter("Press Enter to hope you don't actually have to say 'Bone Room'")
+    tutorial_enter("Press Enter to avoid saying the words 'Bone Room'")
 
     # ══════════════════════════════════════════════════════════
     # STEP 6: Call Steve to the Blood Room
@@ -2089,11 +2218,16 @@ def run_tutorial():
     tutorial_rae("Right, before we go to the waiting room, lets get Steve-o in here, he needs his bloods checked. Press k on that tannoy over there and tell Steve to get himself in here.")
     print()
 
-    tutorial_wait_key("k")
+    step6_escalation = [
+        (tutorial_rae, "Less annoying me, more tannoying Steve."),
+        (tutorial_rae, "Less trying my patience, and more trying to get patients in this room."),
+        (tutorial_rae, "You heard how bad the last one was, I'm not going again. Just call them in the room. Please, I want to go home."),
+    ]
+    tutorial_wait_key_escalating("k", step6_escalation, final_behavior="prompt")
 
     # Patient selection — show patients in other rooms
     others = [p for r in gs.rooms.values()
-              if r.room_type != gs.players[0].current_room for p in r.queue
+              if r.room_type != gs.players[active_idx].current_room for p in r.queue
               if p.checked_in]
     pat = tutorial_wait_patient(["steve"], "Call which patient", others)
 
@@ -2101,57 +2235,88 @@ def run_tutorial():
     waiting.remove_patient(steve)
     blood.add_patient(steve)
     gs.actions_remaining -= 1
-    gs.players[0].action_count += 1
-    gs.log.append(f"Player 1 called Steve from Waiting Room to Blood Room.")
+    gs.players[active_idx].action_count += 1
+    gs.log.append(f"Player {gs.players[active_idx].id} called Steve from Waiting Room to Blood Room.")
 
     render_full_state(gs)
-    print(f"  {GREEN}Player 1 called Steve from Waiting Room to Blood Room.{RESET}")
+    print(f"  {GREEN}Player {gs.players[active_idx].id} called Steve from Waiting Room to Blood Room.{RESET}")
     print()
 
-    tutorial_rae("Do you know what, I'm having fun, you're a good laugh. This job's not so b--")
-    print()
+    tutorial_rae("Ok, so Steve's in here. Nice, we called him here, and we're going to leave him here so that he is auto-diagnosed at the end of the hour. Good stuff.")
+    tutorial_rae("Do you know what, I'm having fun, you're a good laugh. This job's not so b—")
 
     # ══════════════════════════════════════════════════════════
     # STEP 7: Move back to Waiting Room
     # ══════════════════════════════════════════════════════════
     render_full_state(gs)
-    tutorial_rae("That's my wife calling... Can't keep doing these extra hours. Not with a family. Have you got kids?")
-    print()
-    print(f"  {BOLD}Steve:{RESET} \"Sadly not. My missus says I'm plumbed up all wrong.\"")
-    print()
-    tutorial_rae("Ah Steve, I actually meant our new recruit here. Sorry. Ehm, we're just going to leave Steve here for a moment. You'll see why shortly.")
+    tutorial_rae("That's my wife calling… Can't keep doing these extra hours. Not with a family. Have you got kids?")
+    steve_says("Oh? Well.. no… sadly not. Always wanted them but my missus says I'm plumbed up all wrong.")
+    tutorial_rae("Oh Steve, I actually meant our new recruit here. Sorry about that… either your partner knows what she's talking about and you need to speak to a doctor, or she doesn't and you need to speak to her. Either way something needs fixing. But if you'll excuse us Steve we need to be off.")
     tutorial_rae("Lets go back to the waiting room. I'll let you figure out how to get back there yourself.")
     tutorial_rae("Bye Steve.")
-    tutorial_rae("Good luck with your plumbing.")
     print()
 
-    tutorial_wait_key("m")
+    step7_move_escalation = [
+        (tutorial_rae, "Well that's embarrassing.. Ok Steve… this time we really are going."),
+        (tutorial_rae, "..ah.. Look Steve I really am sorry about this.. But our friend here is really trying their best I assure you.."),
+        (tutorial_rae, "Tell you what, I'll meet you there. Bye Steve… good luck with your plumbing"),
+    ]
+    tutorial_wait_key_escalating("m", step7_move_escalation, final_behavior="prompt")
 
     # Player selection
     print(f"  Players: {', '.join(f'P{p.id} @ {p.current_room.value}' for p in gs.players)}")
-    tutorial_wait_choice(["1"], "Which player to move")
+    tutorial_wait_choice([str(gs.players[active_idx].id)], "Which player to move")
 
-    # Room selection
+    # Room selection with Steve's escalating commentary
     print(f"  Room choices: {DIM}(w)aiting, (bl)ood, (bo)ne, (br)ain, (a)dmittance{RESET}")
-    tutorial_wait_choice(["w"], "Move to")
+    step7_room_escalation = [
+        (steve_says, "Oop.. that's a wall…"),
+        (steve_says, "Ouch.. nearly there"),
+        (steve_says, "Ow.. that was the opposite of a door"),
+        (steve_says, "Oh wow.. Were you aiming for the door?"),
+        (steve_says, "Yowzah.. A little to the left next time"),
+        (steve_says, "Ayyiieee.. A lottle to the right"),
+        (steve_says, "Why did you try and go over it…? Through it..through the door.."),
+        (steve_says, "THROUGH IT…"),
+        (steve_says, "UNDER IS NOT AN OPTION! OH MY GOD!!"),
+        (steve_says, "RAE COME BACK! PLEASE I'M SCARED! WHAT IS HAPPENING"),
+        (steve_says, "YOU'RE BLEEDING MORE THAN I AM! I'm going to be sick…"),
+        (steve_says, "Blaughh… please… SOMEBODY"),
+        (steve_says, "Blaughh…"),
+        (steve_says, "*whimpers*"),
+    ]
+    room_esc_idx = 0
+    while True:
+        room_choice = input(f"  Move to: ").strip().lower()
+        if room_choice == "w":
+            break
+        if room_esc_idx < len(step7_room_escalation):
+            speaker, text = step7_room_escalation[room_esc_idx]
+            speaker(text)
+            room_esc_idx += 1
+        else:
+            # After exhausting the list, repeat the last entry
+            speaker, text = step7_room_escalation[-1]
+            speaker(text)
 
     # Execute the move
-    gs.players[0].current_room = RoomType.WAITING
+    gs.players[active_idx].current_room = RoomType.WAITING
     gs.actions_remaining -= 1
-    gs.players[0].action_count += 1
-    gs.log.append(f"Player 1 moved from Blood Room to Waiting Room.")
+    gs.players[active_idx].action_count += 1
+    gs.log.append(f"Player {gs.players[active_idx].id} moved from Blood Room to Waiting Room.")
 
     render_full_state(gs)
-    print(f"  {GREEN}Player 1 moved from Blood Room to Waiting Room.{RESET}")
+    print(f"  {GREEN}Player {gs.players[active_idx].id} moved from Blood Room to Waiting Room.{RESET}")
     print()
-    tutorial_enter("Press Enter to survey the patients in a knowing and confident way")
+    tutorial_enter("Press Enter to give off an air of confidence as you emerge into the waiting room")
 
     # ══════════════════════════════════════════════════════════
     # STEP 8: Send Meg to Admittance
     # ══════════════════════════════════════════════════════════
     render_full_state(gs)
-    tutorial_rae("Meg is fully diagnosed but because she's accumulated some harm she can't be discharged. She'll need to be admitted.")
-    tutorial_rae("Send her to Admittance and the porters will come pick her up at the end of the hour.")
+    tutorial_rae("Okey dokey…")
+    tutorial_rae("Meg is fully diagnosed but, because she's accumulated some harm, she can't be discharged. She'll need to be admitted.")
+    tutorial_rae("Send her to Admittance and the porters will come pick her up at the end of the hour. Just, fair warning, the porters are a bit… familiar…ok?")
     tutorial_rae("I think you know how to send a patient somewhere now.")
     print()
 
@@ -2169,11 +2334,11 @@ def run_tutorial():
     waiting.remove_patient(meg)
     gs.get_room(RoomType.ADMITTANCE).add_patient(meg)
     gs.actions_remaining -= 1
-    gs.players[0].action_count += 1
-    gs.log.append(f"Player 1 sent Meg to Admittance.")
+    gs.players[active_idx].action_count += 1
+    gs.log.append(f"Player {gs.players[active_idx].id} sent Meg to Admittance.")
 
     render_full_state(gs)
-    print(f"  {GREEN}Player 1 sent Meg to Admittance.{RESET}")
+    print(f"  {GREEN}Player {gs.players[active_idx].id} sent Meg to Admittance.{RESET}")
     print()
 
     tutorial_rae("If you have a queue building up in Admittance you can go in there yourself and start admitting people with the room action. But since it's just Meg we'll wait it out til the end of the hour.")
@@ -2183,12 +2348,13 @@ def run_tutorial():
     # STEP 9: Discharge Noor
     # ══════════════════════════════════════════════════════════
     render_full_state(gs)
-    tutorial_rae("Noor on the other hand needs to just be sent home, don't want him storming out do we? And plus... He's DISCHARGE READY!")
-    tutorial_rae("Sorry, didn't mean to shout, I can feel my phone vibrating and I'm feeling a little stressed about it...")
-    tutorial_rae("So it's s again to send, but this time just confirm that you're just discharging him. And maybe tell him to be a bit more careful next time, maybe that it's all going to be ok, and we'll always be here if he needs us or something, you know?")
-    tutorial_rae("To recap -- if there's harm, sound the alarm (for them to be admitted into hospital), if no harm is there, show you care (and then discharge them).")
+    tutorial_rae("Noor on the other hand needs to just be sent home, don't want him giving us a bad review do we? And plus... He's DISCHARGE READY!")
+    tutorial_rae("Sorry, didn't mean to shout, I can feel my phone vibrating and I'm feeling a little stressed about it…")
+    tutorial_rae("So it's s again to send, but this time just confirm that you're just discharging him. And maybe tell him to be a bit more careful next time, maybe that it's all going to be ok, and we'll always be here if he needs us…")
+    tutorial_rae("or something like that ok?")
+    tutorial_rae("To recap — if there's harm, sound the alarm (for them to be admitted into hospital), if no harm is there, show you care (and then discharge them).")
     tutorial_rae("OK?")
-    tutorial_rae("Well go on then!")
+    tutorial_rae("On we go!")
     print()
 
     tutorial_wait_key("s")
@@ -2206,11 +2372,11 @@ def run_tutorial():
     noor.discharged = True
     noor.discharge_turn = gs.turn
     gs.actions_remaining -= 1
-    gs.players[0].action_count += 1
-    gs.log.append(f"Player 1 discharged Noor (0 harm, fully diagnosed).")
+    gs.players[active_idx].action_count += 1
+    gs.log.append(f"Player {gs.players[active_idx].id} discharged Noor (0 harm, fully diagnosed).")
 
     render_full_state(gs)
-    print(f"  {GREEN}Player 1 discharged Noor (0 harm, fully diagnosed).{RESET}")
+    print(f"  {GREEN}Player {gs.players[active_idx].id} discharged Noor (0 harm, fully diagnosed).{RESET}")
     print()
     tutorial_enter("Press Enter to comfort Noor through a difficult time")
 
@@ -2251,8 +2417,7 @@ def run_tutorial():
     # Auto-function 2: Blood Room diagnoses Steve's Blood symptom
     steve_blood_card = steve.symptom_cards[0]
     steve_blood_card.face_up = True
-    steve_harm = steve_blood_card.harm_for_severity(steve.severity)  # +1 at sev 1
-    # Return Steve to Waiting Room
+    steve_harm = steve_blood_card.harm_for_severity(steve.severity)
     blood.remove_patient(steve)
     waiting.add_patient(steve)
     auto_msg2 = f"[Auto] Blood Room diagnosed Steve's Blood: harm +{steve_harm}. No further issues. Returned to Waiting Room."
@@ -2277,22 +2442,30 @@ def run_tutorial():
     print()
     tutorial_enter("Press Enter to continue...")
 
+    # ── Post auto-functions dialogue ──
+    render_full_state(gs)
+    tutorial_rae("The hospital runs a bit without you ordering everyone about, you know.")
+    tutorial_rae("So remember to take it slow and look after your own mental health.")
+    tutorial_rae("But also lives are at stake and if you take your eyes off the wrong patient for even a second…")
+    tutorial_rae("Dead.")
+    tutorial_rae("Do you know what I'm saying?")
+    tutorial_rae("Coroner. Body on a slab. Weepy children shouting daddy in a cold room. 'Gone but not forgotten'. All of that.")
+    tutorial_rae("So mental health on the one hand, actual real health on the other..")
+    tutorial_rae("So.")
+    tutorial_enter("Press Enter to gently push away the feeling of dread")
+
     # ══════════════════════════════════════════════════════════
     # STEP 11: Harm tick explanation
     # ══════════════════════════════════════════════════════════
-    # Game state at turn 7:
-    # Barry: harm_rate = 2 (blood diagnosed), been here since turn 6, now turn 7 = 1 turn = 2 harm
-    # Steve: harm_rate = 1, been here since turn 6, now turn 7 = 1 turn = 1 harm
-    # Horris: freshly checked in, 0 harm
     render_full_state(gs)
 
     tutorial_rae("Right, lets check in on what's been going on with Barry.")
-    tutorial_rae("Hang on... my phone's buzzing again. I'll just...")
-    tutorial_rae("Ok, it's on silent... Right lets check on Baz then.")
-    tutorial_rae("Ok his cumulative harm is at 2 out of 36, because he's been here an extra hour. Another hour 4, another hour 6. You leave him here he's dead in...")
-    tutorial_rae("...12... 16... 18... 18 hours.")
-    tutorial_rae("Oh, you leave him here he's next shift's problem unless of course that tricky little twazzock has some more nasty grubbins up his sleeves, he's still got a couple of symptoms that could have more harm buried in them and you never know how bad it is until you've unpacked it.")
-    tutorial_rae("Shall we unpack them? Eh...?")
+    tutorial_rae("Hang on… my phone's buzzing again. I'll just…")
+    tutorial_rae("Ok, it's on silent… Right lets check on Baz then.")
+    tutorial_rae("Ok his cumulative harm is at 2 out of 36, because he's been here an extra hour. Another hour 4, another hour 6. You leave him here he's dead in…")
+    tutorial_rae("…12… 16… 18… 18 hours.")
+    tutorial_rae("Oh, you leave him here he's next shift's problem, he's still got a couple of symptoms that could have more harm buried in them and you never know how bad it is until you've unpacked it.")
+    tutorial_rae("Shall we unpack them? Eh…?")
     tutorial_rae("Figure out what's going on with him?")
     tutorial_rae("Make sure he'll survive the night?")
     tutorial_rae("What do you think?")
@@ -2308,33 +2481,24 @@ def run_tutorial():
     clear_screen()
     print()
 
-    exit_lines_1 = [
-        "No wait, I think I should do another hour, I'm worried about Barry, I... I...",
-        "Do you remember the difference between discharge and admittance?",
-        "And... And... How many symptoms of the same type are cleared in one go?",
-        "And you have to move multiple staff around? Did you know that? You press P to change. AND IT DOESN'T COST AN ACTION?",
-        "And... And... The inspector! I didn't tell you about the inspector! I have to tell you about the inspector, it's so important.",
-    ]
-    for line in exit_lines_1:
-        tutorial_rae(line)
-        input()
+    tutorial_rae("No wait, I think I should do another hour you haven't really found your feet and I'm worried about Barry.. I…")
+    tutorial_rae("Do you remember the difference between discharge and admittance?")
+    tutorial_rae("And… And… How many symptoms of the same type are cleared in one go?")
+    tutorial_rae("And you have to move multiple staff around? Did you know that? You press P to change. AND IT DOESN'T COST AN ACTION?")
+    tutorial_rae("And… And… The inspector! I didn't tell you about the inspector! I have to tell you about the inspector, it's so important.")
 
     tutorial_enter("Press Enter to remind Rae that she is missing her child's birthday")
 
     tutorial_rae("FINE! Ok, look, where's my pen. SHIT! Ok let me just write this down for you.")
     tutorial_rae("...")
     tutorial_rae("...")
-    input()
 
     tutorial_enter("Press Enter to start walking Rae towards the exit")
 
     tutorial_rae("HANG ON!")
-    input()
-
-    tutorial_rae("Ok, Ok.. Ok.. OH.. Kay. Here... take this, it's just some notes in case you forget anything. Don't forget anything, but if you do forget something then remember to look for it here.")
+    tutorial_rae("Ok, Ok.. Ok.. OH.. Kay. Here… take this, it's just some notes in case you forget anything. Don't forget anything, but if you do forget something then remember to look for it here.")
     tutorial_rae("Good. Ok. Bye.")
     tutorial_rae("Call me if you need anything. Text to update me on Barry.")
-    input()
 
     tutorial_enter("Press Enter to wave from the door of the hospital, nodding in a knowing and generous manner every time she looks back at you")
 
@@ -2343,45 +2507,63 @@ def run_tutorial():
     # ══════════════════════════════════════════════════════════
     clear_screen()
     print()
+    W = 62
+    B = f"{BOLD}{YELLOW}"
+    E = RESET
+    def note_row(text=""):
+        if not text:
+            return f"{B}║{E}{' ' * (W - 2)}{B}║{E}"
+        vis = text
+        while "\033[" in vis:
+            start = vis.index("\033[")
+            end = vis.index("m", start) + 1
+            vis = vis[:start] + vis[end:]
+        pad = max(0, W - 2 - 3 - len(vis))
+        return f"{B}║{E}   {text}{' ' * pad}{B}║{E}"
     note_lines = [
-        f"{BOLD}{YELLOW}╔══════════════════════════════════════════════════════════╗{RESET}",
-        f"{BOLD}{YELLOW}║{RESET}                                                          {BOLD}{YELLOW}║{RESET}",
-        f"{BOLD}{YELLOW}║{RESET}   {BOLD}Rae's Notes:{RESET}                                          {BOLD}{YELLOW}║{RESET}",
-        f"{BOLD}{YELLOW}║{RESET}                                                          {BOLD}{YELLOW}║{RESET}",
-        f"{BOLD}{YELLOW}║{RESET}   Check in unchecked patients in the Waiting Room         {BOLD}{YELLOW}║{RESET}",
-        f"{BOLD}{YELLOW}║{RESET}   (room action -- press d)                                {BOLD}{YELLOW}║{RESET}",
-        f"{BOLD}{YELLOW}║{RESET}                                                          {BOLD}{YELLOW}║{RESET}",
-        f"{BOLD}{YELLOW}║{RESET}   Send patients to the right diagnosis room --            {BOLD}{YELLOW}║{RESET}",
-        f"{BOLD}{YELLOW}║{RESET}   Blood / Bone / Brain (press s)                          {BOLD}{YELLOW}║{RESET}",
-        f"{BOLD}{YELLOW}║{RESET}                                                          {BOLD}{YELLOW}║{RESET}",
-        f"{BOLD}{YELLOW}║{RESET}   Diagnose patients by using the room action in a         {BOLD}{YELLOW}║{RESET}",
-        f"{BOLD}{YELLOW}║{RESET}   diagnosis room (press d)                                {BOLD}{YELLOW}║{RESET}",
-        f"{BOLD}{YELLOW}║{RESET}                                                          {BOLD}{YELLOW}║{RESET}",
-        f"{BOLD}{YELLOW}║{RESET}   Diagnosis can reveal complications -- new symptoms      {BOLD}{YELLOW}║{RESET}",
-        f"{BOLD}{YELLOW}║{RESET}   that need further treatment                             {BOLD}{YELLOW}║{RESET}",
-        f"{BOLD}{YELLOW}║{RESET}                                                          {BOLD}{YELLOW}║{RESET}",
-        f"{BOLD}{YELLOW}║{RESET}   If there's harm, sound the alarm -- send them to        {BOLD}{YELLOW}║{RESET}",
-        f"{BOLD}{YELLOW}║{RESET}   Admittance to be admitted                               {BOLD}{YELLOW}║{RESET}",
-        f"{BOLD}{YELLOW}║{RESET}                                                          {BOLD}{YELLOW}║{RESET}",
-        f"{BOLD}{YELLOW}║{RESET}   If no harm is there, show you care -- discharge them    {BOLD}{YELLOW}║{RESET}",
-        f"{BOLD}{YELLOW}║{RESET}   (send -> confirm discharge)                             {BOLD}{YELLOW}║{RESET}",
-        f"{BOLD}{YELLOW}║{RESET}                                                          {BOLD}{YELLOW}║{RESET}",
-        f"{BOLD}{YELLOW}║{RESET}   Room auto-functions process the front patient in        {BOLD}{YELLOW}║{RESET}",
-        f"{BOLD}{YELLOW}║{RESET}   each room every turn                                    {BOLD}{YELLOW}║{RESET}",
-        f"{BOLD}{YELLOW}║{RESET}                                                          {BOLD}{YELLOW}║{RESET}",
-        f"{BOLD}{YELLOW}║{RESET}   Harm ticks every turn -- the clock is always against    {BOLD}{YELLOW}║{RESET}",
-        f"{BOLD}{YELLOW}║{RESET}   you                                                     {BOLD}{YELLOW}║{RESET}",
-        f"{BOLD}{YELLOW}║{RESET}                                                          {BOLD}{YELLOW}║{RESET}",
-        f"{BOLD}{YELLOW}║{RESET}   Use P to change player - this doesn't cost an action.   {BOLD}{YELLOW}║{RESET}",
-        f"{BOLD}{YELLOW}║{RESET}                                                          {BOLD}{YELLOW}║{RESET}",
-        f"{BOLD}{YELLOW}║{RESET}   In a real game, you'll have 3 staff members, 12         {BOLD}{YELLOW}║{RESET}",
-        f"{BOLD}{YELLOW}║{RESET}   actions per turn, and a steady stream of new arrivals   {BOLD}{YELLOW}║{RESET}",
-        f"{BOLD}{YELLOW}║{RESET}   over a 12-hour night shift. Keeping everyone alive      {BOLD}{YELLOW}║{RESET}",
-        f"{BOLD}{YELLOW}║{RESET}   means making hard choices about who to prioritise.      {BOLD}{YELLOW}║{RESET}",
-        f"{BOLD}{YELLOW}║{RESET}                                                          {BOLD}{YELLOW}║{RESET}",
-        f"{BOLD}{YELLOW}║{RESET}   {BOLD}Good luck. Rae x.{RESET}                                    {BOLD}{YELLOW}║{RESET}",
-        f"{BOLD}{YELLOW}║{RESET}                                                          {BOLD}{YELLOW}║{RESET}",
-        f"{BOLD}{YELLOW}╚══════════════════════════════════════════════════════════╝{RESET}",
+        f"{B}╔{'═' * (W - 2)}╗{E}",
+        note_row(),
+        note_row(f"{BOLD}Rae's Notes:{E}"),
+        note_row(),
+        note_row("- Check in unchecked patients in the Waiting Room"),
+        note_row("  (room action — press d)"),
+        note_row(),
+        note_row("- Send patients to the right diagnosis room —"),
+        note_row("  Blood / Bone / Brain (press s)"),
+        note_row(),
+        note_row("- Diagnose patients by using the room action in a"),
+        note_row("  diagnosis room (press d)"),
+        note_row(),
+        note_row("- Diagnosis can reveal complications — new symptoms"),
+        note_row("  that need further treatment"),
+        note_row(),
+        note_row("- If there's harm, sound the alarm — send them to"),
+        note_row("  Admittance to be admitted"),
+        note_row(),
+        note_row("- If no harm is there, show you care — discharge"),
+        note_row("  them (send → confirm discharge)"),
+        note_row(),
+        note_row("- Room auto-functions process the front patient in"),
+        note_row("  each room every turn"),
+        note_row(),
+        note_row("- Harm ticks every turn — the clock is always"),
+        note_row("  against you"),
+        note_row(),
+        note_row("- Use P to change player - this doesn't cost an"),
+        note_row("  action."),
+        note_row(),
+        note_row("In a real game, you'll have 3 staff members, 12"),
+        note_row("actions per turn, and a steady stream of new"),
+        note_row("arrivals over a 12-hour night shift. Keeping"),
+        note_row("everyone alive means making hard choices about"),
+        note_row("who to prioritise."),
+        note_row(),
+        note_row("You'll be a great hospital administrator -"),
+        note_row("believe in yourself and don't fuck up."),
+        note_row(),
+        note_row(f"{BOLD}Good luck. Rae x.{E}"),
+        note_row(),
+        f"{B}╚{'═' * (W - 2)}╝{E}",
     ]
     for line in centre_block(note_lines):
         print(line)
