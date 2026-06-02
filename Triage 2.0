@@ -47,6 +47,7 @@ SINGLE_SYMPTOM_RATIO = 0.75
 MULTI_SYMPTOM_2_RATIO = 0.80
 SHIFT_START_HOUR = 19  # so turn 1 displays as 8:00 PM
 STORM_OUT_TURNS = 4    # turns before discharge-ready patients storm out
+DISCHARGE_DETERIORATION_MAX = 2
  
 # Harm table: (probability, sev1_harm, sev2_harm, sev3_harm)
 # Slight bump to severity 1 and 2 compared to original
@@ -182,13 +183,11 @@ class Patient:
     def undiagnosed_types(self) -> set:
         return {c.symptom_type for c in self.symptom_cards if not c.face_up}
  
-    @property
-    def can_discharge(self) -> bool:
-        return self.is_fully_diagnosed and self.harm_rate == 0
- 
-    @property
-    def needs_admittance(self) -> bool:
-        return self.is_fully_diagnosed and self.harm_rate > 0
+    def can_discharge(self, current_turn: int) -> bool:
+        return self.is_fully_diagnosed and self.cumulative_harm(current_turn) <= DISCHARGE_DETERIORATION_MAX
+
+    def needs_admittance(self, current_turn: int) -> bool:
+        return self.is_fully_diagnosed and self.cumulative_harm(current_turn) > DISCHARGE_DETERIORATION_MAX
  
  
 @dataclass
@@ -468,7 +467,7 @@ def save_game(gs, active_player_id, slot_name=None):
         }
 
     data = {
-        "version": "1.6",
+        "version": "1.97",
         "turn": gs.turn,
         "total_turns": gs.total_turns,
         "shift_start_hour": gs.shift_start_hour,
@@ -622,7 +621,7 @@ def action_move(gs, player, target_room):
     player.current_room = target_room
     gs.actions_remaining -= 1
     player.action_count += 1
-    msg = f"Player {player.id} moved from {old.value} to {target_room.value}."
+    msg = f"Staff {player.id} moved from {old.value} to {target_room.value}."
     gs.log.append(msg)
     return msg
  
@@ -640,7 +639,7 @@ def action_check_in(gs, player):
     assign_symptom_cards(gs, target)
     gs.actions_remaining -= 1
     player.action_count += 1
-    msg = (f"Player {player.id} checked in {target.name} (Severity {target.severity}, "
+    msg = (f"Staff {player.id} checked in {target.name} (Severity {target.severity}, "
            f"{len(target.symptom_cards)} symptom{'s' if len(target.symptom_cards) != 1 else ''}: "
            f"{', '.join(c.symptom_type.value for c in target.symptom_cards)}).")
     gs.log.append(msg)
@@ -675,13 +674,13 @@ def action_diagnose(gs, player):
     player.action_count += 1
     if len(diagnosed) == 1:
         card, harm = diagnosed[0]
-        msg = (f"Player {player.id} diagnosed {patient.name}'s {stype.value} symptom: "
+        msg = (f"Staff {player.id} diagnosed {patient.name}'s {stype.value} symptom: "
                f"harm +{harm} (sev {patient.severity}). {card.complication_text}. "
                f"Patient returned to Waiting Room.")
     else:
         total_harm = sum(h for _, h in diagnosed)
         comps = "; ".join(c.complication_text for c, _ in diagnosed)
-        msg = (f"Player {player.id} diagnosed 2 of {patient.name}'s {stype.value} symptoms: "
+        msg = (f"Staff {player.id} diagnosed 2 of {patient.name}'s {stype.value} symptoms: "
                f"total harm +{total_harm} (sev {patient.severity}). {comps}. "
                f"Patient returned to Waiting Room.")
     gs.log.append(msg)
@@ -703,29 +702,28 @@ def action_admit(gs, player):
     patient.admitted_turn = gs.turn
     gs.actions_remaining -= 1
     player.action_count += 1
-    msg = f"Player {player.id} transferred {patient.name} out from Admittance."
+    msg = f"Staff {player.id} transferred {patient.name} out from Admittance."
     gs.log.append(msg)
     return msg
  
  
 def action_send(gs, player, patient, target_room):
-    if gs.actions_remaining <= 0:
-        raise ActionError("No actions remaining.")
     current = gs.get_room(player.current_room)
     if patient not in current.queue:
         raise ActionError(f"{patient.name} is not in {player.current_room.value}.")
-    # Explicit discharge request (target_room is None)
+    # Explicit discharge request (target_room is None) — FREE action, allowed at 0 actions
     if target_room is None:
-        if not patient.can_discharge:
+        if not patient.can_discharge(gs.turn):
             raise ActionError(f"{patient.name} cannot be discharged yet.")
         current.remove_patient(patient)
         patient.discharged = True
         patient.discharge_turn = gs.turn
-        gs.actions_remaining -= 1
-        player.action_count += 1
-        msg = f"Player {player.id} discharged {patient.name} (0 harm, fully diagnosed)."
+        msg = f"Staff {player.id} discharged {patient.name}."
         gs.log.append(msg)
         return msg
+    # Send to another room — costs 1 action
+    if gs.actions_remaining <= 0:
+        raise ActionError("No actions remaining.")
     target = gs.get_room(target_room)
     if target.is_full:
         raise ActionError(f"{target_room.value} is full ({target.capacity} patients).")
@@ -733,7 +731,7 @@ def action_send(gs, player, patient, target_room):
     target.add_patient(patient)
     gs.actions_remaining -= 1
     player.action_count += 1
-    msg = f"Player {player.id} sent {patient.name} to {target_room.value}."
+    msg = f"Staff {player.id} sent {patient.name} to {target_room.value}."
     gs.log.append(msg)
     return msg
  
@@ -753,7 +751,7 @@ def action_call(gs, player, patient):
     player_room.add_patient(patient)
     gs.actions_remaining -= 1
     player.action_count += 1
-    msg = f"Player {player.id} called {patient.name} from {source.room_type.value} to {player.current_room.value}."
+    msg = f"Staff {player.id} called {patient.name} from {source.room_type.value} to {player.current_room.value}."
     gs.log.append(msg)
     return msg
  
@@ -767,7 +765,7 @@ def action_rearrange(gs, player, new_order):
     room.queue = list(new_order)
     gs.actions_remaining -= 1
     player.action_count += 1
-    msg = f"Player {player.id} rearranged {player.current_room.value} queue: {', '.join(p.name for p in new_order)}."
+    msg = f"Staff {player.id} rearranged {player.current_room.value} queue: {', '.join(p.name for p in new_order)}."
     gs.log.append(msg)
     return msg
  
@@ -852,7 +850,7 @@ def phase_auto_functions(gs):
     # Tag newly discharge-ready patients
     for room in gs.rooms.values():
         for patient in room.queue:
-            if (patient.checked_in and patient.can_discharge
+            if (patient.checked_in and patient.can_discharge(gs.turn)
                     and patient.ready_for_discharge_turn is None):
                 patient.ready_for_discharge_turn = gs.turn
  
@@ -861,7 +859,7 @@ def phase_auto_functions(gs):
         for patient in list(room.queue):
             if patient.ready_for_discharge_turn is None:
                 continue
-            if not patient.can_discharge:
+            if not patient.can_discharge(gs.turn):
                 continue
             turns_waiting = gs.turn - patient.ready_for_discharge_turn
             if turns_waiting >= STORM_OUT_TURNS:
@@ -1060,14 +1058,13 @@ def render_header(gs):
     ac = GREEN if actions > total_actions // 2 else (YELLOW if actions > 2 else RED)
     dc = GREEN if deaths == 0 else (YELLOW if deaths <= DEATH_THRESHOLD else RED)
     print(f"  Actions: {ac}{BOLD}{actions}{RESET}/{total_actions}"
-          f"    Deaths: {dc}{BOLD}{deaths}{RESET}/{DEATH_THRESHOLD} threshold"
-          f"    Deck: {len(gs.patient_deck)} patients remaining")
+          f"    Deaths: {dc}{BOLD}{deaths}{RESET}/{DEATH_THRESHOLD + 1}")
     print()
  
  
 def render_patient_line(gs, patient, prefix, detail=True):
     if not patient.checked_in:
-        print(f"{prefix}{DIM}[???] Unknown patient (face-down){RESET}")
+        print(f"{prefix}{DIM}[???] Unknown patient{RESET}")
         return
     sc = SEV_COLORS[patient.severity]
     hr = patient.harm_rate
@@ -1093,15 +1090,8 @@ def render_patient_line(gs, patient, prefix, detail=True):
  
     status = ""
     if patient.is_fully_diagnosed:
-        if patient.harm_rate == 0:
-            if patient.ready_for_discharge_turn is not None:
-                turns_left = max(0, STORM_OUT_TURNS - (gs.turn - patient.ready_for_discharge_turn))
-                if turns_left > 0:
-                    status = f"{GREEN}DISCHARGE READY ({turns_left}){RESET}"
-                else:
-                    status = f"{YELLOW}ABOUT TO STORM OUT{RESET}"
-            else:
-                status = f"{GREEN}DISCHARGE READY{RESET}"
+        if ch <= DISCHARGE_DETERIORATION_MAX:
+            status = f"{GREEN}DISCHARGE READY{RESET}"
         else:
             status = f"{YELLOW}NEEDS ADMITTANCE{RESET}"
  
@@ -1155,10 +1145,10 @@ def render_map(gs):
  
  
 def render_players(gs):
-    print(f"  {BOLD}Players:{RESET}")
+    print(f"  {BOLD}Staff:{RESET}")
     for p in gs.players:
         c = ROOM_COLORS[p.current_room]
-        print(f"    Player {p.id}: {c}{p.current_room.value}{RESET}")
+        print(f"    Staff {p.id}: {c}{p.current_room.value}{RESET}")
     print()
  
  
@@ -1179,7 +1169,7 @@ def render_full_state(gs):
  
 def render_action_menu(gs, pid):
     player = gs.players[pid - 1]
-    print(f"  {BOLD}Player {player.id} @ {player.current_room.value}{RESET} "
+    print(f"  {BOLD}Staff {player.id} @ {player.current_room.value}{RESET} "
           f"({gs.actions_remaining} actions left)")
     print()
     print(f"  Actions:")
@@ -1300,7 +1290,7 @@ def render_how_to_play():
         f"Each turn represents 1 hour:",
         f"  1. {YELLOW}Harm tick{RESET} — all patients accumulate damage",
         f"  2. {CYAN}Arrivals{RESET} — new patients enter the Waiting Room",
-        f"  3. {GREEN}Player actions{RESET} — {NUM_PLAYERS * ACTIONS_PER_PLAYER} actions shared between {NUM_PLAYERS} staff",
+        f"  3. {GREEN}Staff actions{RESET} — {NUM_PLAYERS * ACTIONS_PER_PLAYER} actions shared between {NUM_PLAYERS} staff",
         f"  4. {MAGENTA}Room auto-functions{RESET} — rooms process their front patient",
         "",
         f"{BOLD}PLAYER ACTIONS{RESET}",
@@ -1485,7 +1475,7 @@ def render_statistics(stats):
         print(f"  {BOLD}Sickest patient:{RESET} {sp.name} — {stats['sickest_cards']} symptom cards")
  
     bp = stats['busiest_player']
-    print(f"  {BOLD}Busiest doctor:{RESET}  Player {bp.id} — {stats['busiest_actions']} actions used")
+    print(f"  {BOLD}Busiest doctor:{RESET}  Staff {bp.id} — {stats['busiest_actions']} actions used")
     print()
  
  
@@ -1982,10 +1972,10 @@ def run_tutorial():
     steve.symptom_cards = [steve_blood]
     gs.actions_remaining -= 1
     gs.players[active_idx].action_count += 1
-    gs.log.append(f"Player {gs.players[active_idx].id} checked in Steve (Severity 1, 1 symptom: Blood).")
+    gs.log.append(f"Staff {gs.players[active_idx].id} checked in Steve (Severity 1, 1 symptom: Blood).")
 
     render_full_state(gs)
-    print(f"  {GREEN}Player {gs.players[active_idx].id} checked in Steve (Severity 1, 1 symptom: Blood).{RESET}")
+    print(f"  {GREEN}Staff {gs.players[active_idx].id} checked in Steve (Severity 1, 1 symptom: Blood).{RESET}")
     print()
 
     tutorial_rae("Ok Steve-o what's your story? Looks like it's severity 1, so the category of least concern.")
@@ -2100,10 +2090,10 @@ def run_tutorial():
     blood.add_patient(barry)
     gs.actions_remaining -= 1
     gs.players[active_idx].action_count += 1
-    gs.log.append(f"Player {gs.players[active_idx].id} sent Barry to Blood Room.")
+    gs.log.append(f"Staff {gs.players[active_idx].id} sent Barry to Blood Room.")
 
     render_full_state(gs)
-    print(f"  {GREEN}Player {gs.players[active_idx].id} sent Barry to Blood Room.{RESET}")
+    print(f"  {GREEN}Staff {gs.players[active_idx].id} sent Barry to Blood Room.{RESET}")
     print()
 
     tutorial_rae("Ok Barry's in the Blood Room, but there's no-one there to diagnose him. So… say it with me now…")
@@ -2129,7 +2119,7 @@ def run_tutorial():
     # Player selection — allows picking any player
     print()
     tutorial_rae("The first one. Tell them to go.")
-    print(f"  Players: {', '.join(f'P{p.id} @ {p.current_room.value}' for p in gs.players)}")
+    print(f"  Staff: {', '.join(f'P{p.id} @ {p.current_room.value}' for p in gs.players)}")
     valid_players = [str(p.id) for p in gs.players]
     player_choice = tutorial_wait_choice(valid_players, "Which player to move")
     chosen_idx = int(player_choice) - 1
@@ -2157,10 +2147,10 @@ def run_tutorial():
     gs.players[active_idx].current_room = RoomType.BLOOD
     gs.actions_remaining -= 1
     gs.players[active_idx].action_count += 1
-    gs.log.append(f"Player {gs.players[active_idx].id} moved from Waiting Room to Blood Room.")
+    gs.log.append(f"Staff {gs.players[active_idx].id} moved from Waiting Room to Blood Room.")
 
     render_full_state(gs)
-    print(f"  {GREEN}Player {gs.players[active_idx].id} moved from Waiting Room to Blood Room.{RESET}")
+    print(f"  {GREEN}Staff {gs.players[active_idx].id} moved from Waiting Room to Blood Room.{RESET}")
     print()
 
     tutorial_rae("Ok nice. All the right people in all the right places.")
@@ -2199,10 +2189,10 @@ def run_tutorial():
     waiting.add_patient(barry)
     gs.actions_remaining -= 1
     gs.players[active_idx].action_count += 1
-    gs.log.append(f"Player {gs.players[active_idx].id} diagnosed Barry's Blood symptom: harm +{harm} (sev 3). +1 Brain. Patient returned to Waiting Room.")
+    gs.log.append(f"Staff {gs.players[active_idx].id} diagnosed Barry's Blood symptom: harm +{harm} (sev 3). +1 Brain. Patient returned to Waiting Room.")
 
     render_full_state(gs)
-    print(f"  {GREEN}Player {gs.players[active_idx].id} diagnosed Barry's Blood symptom: harm +{harm} (sev 3). +1 Brain. Patient returned to Waiting Room.{RESET}")
+    print(f"  {GREEN}Staff {gs.players[active_idx].id} diagnosed Barry's Blood symptom: harm +{harm} (sev 3). +1 Brain. Patient returned to Waiting Room.{RESET}")
     print()
 
     tutorial_rae("Pissing hell Barry!!")
@@ -2236,10 +2226,10 @@ def run_tutorial():
     blood.add_patient(steve)
     gs.actions_remaining -= 1
     gs.players[active_idx].action_count += 1
-    gs.log.append(f"Player {gs.players[active_idx].id} called Steve from Waiting Room to Blood Room.")
+    gs.log.append(f"Staff {gs.players[active_idx].id} called Steve from Waiting Room to Blood Room.")
 
     render_full_state(gs)
-    print(f"  {GREEN}Player {gs.players[active_idx].id} called Steve from Waiting Room to Blood Room.{RESET}")
+    print(f"  {GREEN}Staff {gs.players[active_idx].id} called Steve from Waiting Room to Blood Room.{RESET}")
     print()
 
     tutorial_rae("Ok, so Steve's in here. Nice, we called him here, and we're going to leave him here so that he is auto-diagnosed at the end of the hour. Good stuff.")
@@ -2264,7 +2254,7 @@ def run_tutorial():
     tutorial_wait_key_escalating("m", step7_move_escalation, final_behavior="prompt")
 
     # Player selection
-    print(f"  Players: {', '.join(f'P{p.id} @ {p.current_room.value}' for p in gs.players)}")
+    print(f"  Staff: {', '.join(f'P{p.id} @ {p.current_room.value}' for p in gs.players)}")
     tutorial_wait_choice([str(gs.players[active_idx].id)], "Which player to move")
 
     # Room selection with Steve's escalating commentary
@@ -2303,10 +2293,10 @@ def run_tutorial():
     gs.players[active_idx].current_room = RoomType.WAITING
     gs.actions_remaining -= 1
     gs.players[active_idx].action_count += 1
-    gs.log.append(f"Player {gs.players[active_idx].id} moved from Blood Room to Waiting Room.")
+    gs.log.append(f"Staff {gs.players[active_idx].id} moved from Blood Room to Waiting Room.")
 
     render_full_state(gs)
-    print(f"  {GREEN}Player {gs.players[active_idx].id} moved from Blood Room to Waiting Room.{RESET}")
+    print(f"  {GREEN}Staff {gs.players[active_idx].id} moved from Blood Room to Waiting Room.{RESET}")
     print()
     tutorial_enter("Press Enter to give off an air of confidence as you emerge into the waiting room")
 
@@ -2335,10 +2325,10 @@ def run_tutorial():
     gs.get_room(RoomType.ADMITTANCE).add_patient(meg)
     gs.actions_remaining -= 1
     gs.players[active_idx].action_count += 1
-    gs.log.append(f"Player {gs.players[active_idx].id} sent Meg to Admittance.")
+    gs.log.append(f"Staff {gs.players[active_idx].id} sent Meg to Admittance.")
 
     render_full_state(gs)
-    print(f"  {GREEN}Player {gs.players[active_idx].id} sent Meg to Admittance.{RESET}")
+    print(f"  {GREEN}Staff {gs.players[active_idx].id} sent Meg to Admittance.{RESET}")
     print()
 
     tutorial_rae("If you have a queue building up in Admittance you can go in there yourself and start admitting people with the room action. But since it's just Meg we'll wait it out til the end of the hour.")
@@ -2364,19 +2354,17 @@ def run_tutorial():
     pat = tutorial_wait_patient(["noor"], "Send which patient", room_patients)
 
     # Discharge confirmation
-    print(f"  {noor.name} can be discharged (0 harm). Discharge? (y/n): ")
+    print(f"  {noor.name} can be discharged. Discharge? (y/n): ")
     tutorial_wait_choice(["y"], "Discharge? (y/n)")
 
-    # Execute the discharge
+    # Execute the discharge — free action, no action cost
     waiting.remove_patient(noor)
     noor.discharged = True
     noor.discharge_turn = gs.turn
-    gs.actions_remaining -= 1
-    gs.players[active_idx].action_count += 1
-    gs.log.append(f"Player {gs.players[active_idx].id} discharged Noor (0 harm, fully diagnosed).")
+    gs.log.append(f"Staff {gs.players[active_idx].id} discharged {noor.name}.")
 
     render_full_state(gs)
-    print(f"  {GREEN}Player {gs.players[active_idx].id} discharged Noor (0 harm, fully diagnosed).{RESET}")
+    print(f"  {GREEN}Staff {gs.players[active_idx].id} discharged {noor.name}.{RESET}")
     print()
     tutorial_enter("Press Enter to comfort Noor through a difficult time")
 
@@ -2702,8 +2690,8 @@ def run_interactive(seed=None):
                     pat = input_patient("Send which patient", room.queue)
                     if pat is None:
                         print(f"  {DIM}Cancelled.{RESET}")
-                    elif pat.can_discharge:
-                        yn = input(f"  {pat.name} can be discharged (0 harm). "
+                    elif pat.can_discharge(gs.turn):
+                        yn = input(f"  {pat.name} can be discharged. "
                                    f"Discharge? (y/n, c = cancel): ").strip().lower()
                         if yn == "y":
                             try:
@@ -2779,7 +2767,7 @@ def run_interactive(seed=None):
                         print(f"  {RED}{e}{RESET}")
  
             elif choice == "p":
-                print(f"  Players: {', '.join(f'P{p.id} @ {p.current_room.value}' for p in gs.players)}")
+                print(f"  Staff: {', '.join(f'P{p.id} @ {p.current_room.value}' for p in gs.players)}")
                 try:
                     raw = input("  Switch to player # (c = cancel): ").strip()
                     if raw.lower() == "c":
@@ -2788,9 +2776,9 @@ def run_interactive(seed=None):
                         pid = int(raw)
                         if 1 <= pid <= len(gs.players):
                             active = pid
-                            print(f"  {GREEN}Now controlling Player {pid}.{RESET}")
+                            print(f"  {GREEN}Now controlling Staff {pid}.{RESET}")
                         else:
-                            print(f"  {RED}Invalid player number.{RESET}")
+                            print(f"  {RED}Invalid staff number.{RESET}")
                 except ValueError:
                     print(f"  {RED}Invalid input.{RESET}")
  
@@ -2889,13 +2877,13 @@ def ai_decide_action(gs, player_idx):
     for pat in list(room.queue):
         if not pat.checked_in or not pat.is_fully_diagnosed:
             continue
-        if pat.can_discharge:
+        if pat.can_discharge(gs.turn):
             try:
                 action_send(gs, player, pat, None)
                 return True
             except ActionError:
                 pass
-        elif pat.needs_admittance and not gs.get_room(RoomType.ADMITTANCE).is_full:
+        elif pat.needs_admittance(gs.turn) and not gs.get_room(RoomType.ADMITTANCE).is_full:
             try:
                 action_send(gs, player, pat, RoomType.ADMITTANCE)
                 return True
@@ -2930,13 +2918,13 @@ def ai_decide_action(gs, player_idx):
         for pat in list(waiting.queue):
             if not pat.checked_in or not pat.is_fully_diagnosed:
                 continue
-            if pat.can_discharge:
+            if pat.can_discharge(gs.turn):
                 try:
                     action_send(gs, player, pat, None)
                     return True
                 except ActionError:
                     pass
-            elif pat.needs_admittance and not gs.get_room(RoomType.ADMITTANCE).is_full:
+            elif pat.needs_admittance(gs.turn) and not gs.get_room(RoomType.ADMITTANCE).is_full:
                 try:
                     action_send(gs, player, pat, RoomType.ADMITTANCE)
                     return True
