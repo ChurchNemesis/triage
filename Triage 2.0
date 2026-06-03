@@ -48,7 +48,19 @@ MULTI_SYMPTOM_2_RATIO = 0.80
 SHIFT_START_HOUR = 19  # so turn 1 displays as 8:00 PM
 STORM_OUT_TURNS = 4    # turns before discharge-ready patients storm out
 DISCHARGE_DETERIORATION_MAX = 2
- 
+
+# Staff abilities
+FIRST_AIDER_DETERIORATION_MAX = 6
+PHARMACIST_HARM_REDUCTION = 1
+CPR_REVIVE_TARGET = 18          # deterioration the patient is left at after CPR (~half of 36)
+CPR_WINDOW_TURNS = 2            # can only revive a patient who died this turn or last
+ABILITY_COST = {               # action cost of each ACTIVE ability
+    "CPR": 3,
+    "FAST_TRACK": 2,
+    "FIRST_AIDER": 2,
+    "PHARMACIST": 3,
+}
+
 # Harm table: (probability, sev1_harm, sev2_harm, sev3_harm)
 # Slight bump to severity 1 and 2 compared to original
 SYMPTOM_HARM_TABLE = [
@@ -113,8 +125,30 @@ ADJACENT = {
     RoomType.BRAIN: {RoomType.WAITING},
     RoomType.ADMITTANCE: {RoomType.WAITING},
 }
- 
- 
+
+
+class Role(Enum):
+    CPR = "CPR"
+    SPECIALIST_BLOOD = "Blood Specialist"
+    SPECIALIST_BONE = "Bone Specialist"
+    SPECIALIST_BRAIN = "Brain Specialist"
+    FAST_TRACK = "Fast-Track"
+    FIRST_AIDER = "First Aider"
+    PHARMACIST = "Pharmacist"
+    MIDDLE_MANAGER = "Middle Manager"
+
+
+SENIOR_ROLES = [Role.CPR]
+JUNIOR_ROLES = [Role.SPECIALIST_BLOOD, Role.SPECIALIST_BONE, Role.SPECIALIST_BRAIN,
+                Role.FAST_TRACK, Role.FIRST_AIDER, Role.PHARMACIST, Role.MIDDLE_MANAGER]
+ACTIVE_ROLES = {Role.CPR, Role.FAST_TRACK, Role.FIRST_AIDER, Role.PHARMACIST}  # use the `a` key
+SPECIALIST_ROOM = {            # which room each specialist's perk fires in
+    Role.SPECIALIST_BLOOD: RoomType.BLOOD,
+    Role.SPECIALIST_BONE: RoomType.BONE,
+    Role.SPECIALIST_BRAIN: RoomType.BRAIN,
+}
+
+
 @dataclass
 class SymptomCard:
     symptom_type: SymptomType
@@ -150,27 +184,34 @@ class Patient:
     admitted_turn: Optional[int] = None            # turn when admitted/transferred
     stormed_out: bool = False                      # auto-discharged after waiting too long
     ready_for_discharge_turn: Optional[int] = None # turn when first tagged discharge-ready
- 
+    harm_rate_offset: int = 0        # Pharmacist: persistent -1s to harm rate
+    deterioration_offset: int = 0    # CPR: flat reduction to deterioration
+
     @property
     def harm_rate(self) -> int:
-        return sum(c.harm_for_severity(self.severity) for c in self.symptom_cards if c.face_up)
- 
+        base = sum(c.harm_for_severity(self.severity) for c in self.symptom_cards if c.face_up)
+        return max(0, base - self.harm_rate_offset)
+
     @property
     def total_harm_rate(self) -> int:
-        return sum(c.harm_for_severity(self.severity) for c in self.symptom_cards)
- 
+        base = sum(c.harm_for_severity(self.severity) for c in self.symptom_cards)
+        return max(0, base - self.harm_rate_offset)
+
     def cumulative_harm(self, current_turn: int) -> int:
         if self.arrival_turn is None:
             return 0
-        raw = self.harm_rate * (current_turn - self.arrival_turn)
-        return min(raw, PATIENT_HEALTH)
- 
+        raw = self.harm_rate * (current_turn - self.arrival_turn) - self.deterioration_offset
+        return max(0, min(raw, PATIENT_HEALTH))
+
     def cumulative_harm_total(self, current_turn: int) -> int:
         if self.arrival_turn is None:
             return 0
-        raw = self.total_harm_rate * (current_turn - self.arrival_turn)
-        return min(raw, PATIENT_HEALTH)
- 
+        raw = self.total_harm_rate * (current_turn - self.arrival_turn) - self.deterioration_offset
+        return max(0, min(raw, PATIENT_HEALTH))
+
+    def is_dead(self, current_turn: int) -> bool:
+        return self.death_turn is not None or self.cumulative_harm_total(current_turn) >= PATIENT_HEALTH
+
     @property
     def is_fully_diagnosed(self) -> bool:
         return all(c.face_up for c in self.symptom_cards)
@@ -224,6 +265,8 @@ class Player:
     id: int
     current_room: RoomType = RoomType.WAITING
     action_count: int = 0
+    role: Optional["Role"] = None
+    cpr_used: bool = False     # senior only
  
  
 # ═══════════════════════════════════════════════════════════════
@@ -356,7 +399,10 @@ def create_game(seed=None, late_for_work=False):
         RoomType.BRAIN: Room(RoomType.BRAIN, capacity=ROOM_CAPACITY),
         RoomType.ADMITTANCE: Room(RoomType.ADMITTANCE, capacity=ROOM_CAPACITY),
     }
-    gs.players = [Player(id=i + 1) for i in range(NUM_PLAYERS)]
+    senior_role = random.choice(SENIOR_ROLES)              # currently always CPR
+    junior_roles = random.sample(JUNIOR_ROLES, NUM_PLAYERS - 1)  # 2 of 7, no dupes
+    roles = [senior_role] + junior_roles
+    gs.players = [Player(id=i + 1, role=roles[i]) for i in range(NUM_PLAYERS)]
     gs.patient_deck = generate_patient_deck()
     for st in SymptomType:
         gs.symptom_decks[st] = generate_symptom_deck(st)
@@ -424,6 +470,8 @@ def _serialize_patient(patient):
         "admitted_turn": patient.admitted_turn,
         "stormed_out": patient.stormed_out,
         "ready_for_discharge_turn": patient.ready_for_discharge_turn,
+        "harm_rate_offset": patient.harm_rate_offset,
+        "deterioration_offset": patient.deterioration_offset,
     }
 
 
@@ -445,6 +493,8 @@ def _deserialize_patient(d):
     p.admitted_turn = d["admitted_turn"]
     p.stormed_out = d["stormed_out"]
     p.ready_for_discharge_turn = d["ready_for_discharge_turn"]
+    p.harm_rate_offset = d.get("harm_rate_offset", 0)
+    p.deterioration_offset = d.get("deterioration_offset", 0)
     return p
 
 
@@ -474,7 +524,9 @@ def save_game(gs, active_player_id, slot_name=None):
         "actions_remaining": gs.actions_remaining,
         "active_player_id": active_player_id,
         "players": [{"id": p.id, "current_room": p.current_room.value,
-                      "action_count": p.action_count} for p in gs.players],
+                      "action_count": p.action_count,
+                      "role": p.role.value if p.role else None,
+                      "cpr_used": p.cpr_used} for p in gs.players],
         "all_patients": [_serialize_patient(p) for p in gs.all_patients],
         "patient_deck": [_serialize_patient(p) for p in gs.patient_deck],
         "rooms": room_data,
@@ -511,7 +563,9 @@ def load_game(filepath):
     gs.players = []
     for pd in data["players"]:
         p = Player(id=pd["id"], current_room=RoomType(pd["current_room"]),
-                   action_count=pd["action_count"])
+                   action_count=pd["action_count"],
+                   role=Role(pd["role"]) if pd.get("role") else None,
+                   cpr_used=pd.get("cpr_used", False))
         gs.players.append(p)
 
     # Restore all_patients (the canonical patient objects)
@@ -668,21 +722,30 @@ def action_diagnose(gs, player):
     for card in matching[:2]:
         harm = _diagnose_card(gs, patient, card)
         diagnosed.append((card, harm))
-    room.remove_patient(patient)
-    gs.get_room(RoomType.WAITING).add_patient(patient)
+    # Specialist retention: matching specialist keeps the patient at the room
+    # front iff a same-type symptom is still undiagnosed; otherwise re-route.
+    still_same_type = any(not c.face_up and c.symptom_type == stype for c in patient.symptom_cards)
+    is_matching_specialist = (player.role in SPECIALIST_ROOM and SPECIALIST_ROOM[player.role] == rt)
+    retained = is_matching_specialist and still_same_type
+    if retained:
+        pass  # patient stays at the front of this room's queue (no re-route)
+    else:
+        room.remove_patient(patient)
+        gs.get_room(RoomType.WAITING).add_patient(patient)
     gs.actions_remaining -= 1
     player.action_count += 1
+    where = f"Kept in {rt.value} (Specialist)." if retained else "Patient returned to Waiting Room."
     if len(diagnosed) == 1:
         card, harm = diagnosed[0]
         msg = (f"Staff {player.id} diagnosed {patient.name}'s {stype.value} symptom: "
                f"harm +{harm} (sev {patient.severity}). {card.complication_text}. "
-               f"Patient returned to Waiting Room.")
+               f"{where}")
     else:
         total_harm = sum(h for _, h in diagnosed)
         comps = "; ".join(c.complication_text for c, _ in diagnosed)
         msg = (f"Staff {player.id} diagnosed 2 of {patient.name}'s {stype.value} symptoms: "
                f"total harm +{total_harm} (sev {patient.severity}). {comps}. "
-               f"Patient returned to Waiting Room.")
+               f"{where}")
     gs.log.append(msg)
     return msg
  
@@ -768,8 +831,94 @@ def action_rearrange(gs, player, new_order):
     msg = f"Staff {player.id} rearranged {player.current_room.value} queue: {', '.join(p.name for p in new_order)}."
     gs.log.append(msg)
     return msg
- 
- 
+
+
+# ── Active staff abilities (the `a` key) ──
+
+def ability_cpr(gs, player, patient):
+    if player.role != Role.CPR:
+        raise ActionError("Only the Senior can perform CPR.")
+    if player.cpr_used:
+        raise ActionError("CPR has already been used this game.")
+    if patient.death_turn is None:
+        raise ActionError(f"{patient.name} is not dead.")
+    if gs.turn - patient.death_turn > CPR_WINDOW_TURNS:
+        raise ActionError(f"{patient.name} has been dead too long to revive.")
+    if patient not in gs.get_room(player.current_room).queue:
+        raise ActionError(f"{patient.name} is not in {player.current_room.value}.")
+    cost = ABILITY_COST["CPR"]
+    if gs.actions_remaining < cost:
+        raise ActionError("Not enough actions for CPR.")
+    raw = patient.harm_rate * (gs.turn - patient.arrival_turn)
+    patient.deterioration_offset = max(0, raw - CPR_REVIVE_TARGET)
+    patient.death_turn = None
+    patient.ready_for_discharge_turn = None
+    gs.actions_remaining -= cost
+    player.action_count += cost
+    player.cpr_used = True
+    msg = f"CPR! {patient.name} is back."
+    gs.log.append(msg)
+    return msg
+
+
+def ability_pharmacist(gs, player, patient):
+    if player.role != Role.PHARMACIST:
+        raise ActionError("Only the Pharmacist can do this.")
+    if not patient.checked_in:
+        raise ActionError(f"{patient.name} has not been checked in.")
+    if patient.is_dead(gs.turn):
+        raise ActionError("Can't medicate the dead.")
+    cost = ABILITY_COST["PHARMACIST"]
+    if gs.actions_remaining < cost:
+        raise ActionError("Not enough actions.")
+    patient.harm_rate_offset += PHARMACIST_HARM_REDUCTION
+    gs.actions_remaining -= cost
+    player.action_count += cost
+    msg = f"Pharmacist treated {patient.name} (harm -{PHARMACIST_HARM_REDUCTION})."
+    gs.log.append(msg)
+    return msg
+
+
+def ability_first_aider(gs, player, patient):
+    if player.role != Role.FIRST_AIDER:
+        raise ActionError("Only the First Aider can do this.")
+    if not patient.is_fully_diagnosed:
+        raise ActionError(f"{patient.name} is not fully diagnosed.")
+    if patient.cumulative_harm(gs.turn) > FIRST_AIDER_DETERIORATION_MAX:
+        raise ActionError(f"{patient.name} is too far gone for First Aider (must be <= {FIRST_AIDER_DETERIORATION_MAX}).")
+    cost = ABILITY_COST["FIRST_AIDER"]
+    if gs.actions_remaining < cost:
+        raise ActionError("Not enough actions.")
+    gs.find_patient_room(patient).remove_patient(patient)
+    patient.discharged = True
+    patient.discharge_turn = gs.turn
+    gs.actions_remaining -= cost
+    player.action_count += cost
+    msg = f"First Aider discharged {patient.name}."
+    gs.log.append(msg)
+    return msg
+
+
+def ability_fast_track(gs, player, patient):
+    if player.role != Role.FAST_TRACK:
+        raise ActionError("Only Fast-Track can do this.")
+    if not patient.checked_in:
+        raise ActionError(f"{patient.name} has not been checked in.")
+    if patient.is_dead(gs.turn):
+        raise ActionError("Can't admit the dead.")
+    cost = ABILITY_COST["FAST_TRACK"]
+    if gs.actions_remaining < cost:
+        raise ActionError("Not enough actions.")
+    gs.find_patient_room(patient).remove_patient(patient)
+    patient.admitted = True
+    patient.admitted_turn = gs.turn
+    gs.actions_remaining -= cost
+    player.action_count += cost
+    msg = f"Fast-Track admitted {patient.name}."
+    gs.log.append(msg)
+    return msg
+
+
 # ── Turn Phases ──
  
 def phase_arrivals(gs):
@@ -796,32 +945,38 @@ def phase_arrivals(gs):
         gs.log.append("No new arrivals (patient deck empty).")
  
  
-def phase_auto_functions(gs):
+def _auto_room_action(gs, rt):
+    """Perform one room's end-of-turn auto-action on its front patient.
+
+    Returns True if something happened, False otherwise (no-op).
+    """
     waiting = gs.get_room(RoomType.WAITING)
- 
-    # Auto check-in
-    for patient in waiting.queue:
-        if not patient.checked_in:
-            patient.checked_in = True
-            assign_symptom_cards(gs, patient)
-            gs.log.append(f"[Auto] Waiting Room checked in {patient.name} "
-                          f"(Severity {patient.severity}, "
-                          f"{len(patient.symptom_cards)} symptoms: "
-                          f"{', '.join(c.symptom_type.value for c in patient.symptom_cards)}).")
-            break
- 
-    # Auto diagnose (up to 2 matching symptoms per room)
-    for rt in [RoomType.BLOOD, RoomType.BONE, RoomType.BRAIN]:
+
+    if rt == RoomType.WAITING:
+        # Check in the first not-yet-checked-in patient.
+        for patient in waiting.queue:
+            if not patient.checked_in:
+                patient.checked_in = True
+                assign_symptom_cards(gs, patient)
+                gs.log.append(f"[Auto] Waiting Room checked in {patient.name} "
+                              f"(Severity {patient.severity}, "
+                              f"{len(patient.symptom_cards)} symptoms: "
+                              f"{', '.join(c.symptom_type.value for c in patient.symptom_cards)}).")
+                return True
+        return False
+
+    if rt in (RoomType.BLOOD, RoomType.BONE, RoomType.BRAIN):
+        # Diagnose up to 2 matching symptoms on the front patient, return to Waiting.
         room = gs.get_room(rt)
         if not room.queue:
-            continue
+            return False
         patient = room.queue[0]
         if not patient.checked_in:
-            continue
+            return False
         stype = ROOM_TO_SYMPTOM[rt]
         matching = [c for c in patient.symptom_cards if not c.face_up and c.symptom_type == stype]
         if not matching:
-            continue
+            return False
         diagnosed = []
         for card in matching[:2]:
             harm = _diagnose_card(gs, patient, card)
@@ -837,16 +992,33 @@ def phase_auto_functions(gs):
             gs.log.append(f"[Auto] {rt.value} diagnosed {len(diagnosed)} of {patient.name}'s "
                           f"{stype.value} symptoms: total harm +{total_harm}. "
                           f"Returned to Waiting Room.")
- 
-    # Auto admittance
-    admittance = gs.get_room(RoomType.ADMITTANCE)
-    if admittance.queue:
-        patient = admittance.queue[0]
-        admittance.remove_patient(patient)
-        patient.admitted = True
-        patient.admitted_turn = gs.turn
-        gs.log.append(f"[Auto] Admittance transferred {patient.name} out of the game.")
- 
+        return True
+
+    if rt == RoomType.ADMITTANCE:
+        admittance = gs.get_room(RoomType.ADMITTANCE)
+        if admittance.queue:
+            patient = admittance.queue[0]
+            admittance.remove_patient(patient)
+            patient.admitted = True
+            patient.admitted_turn = gs.turn
+            gs.log.append(f"[Auto] Admittance transferred {patient.name} out of the game.")
+            return True
+        return False
+
+    return False
+
+
+def phase_auto_functions(gs):
+    # Each room performs its auto-action once, in the established order.
+    for rt in [RoomType.WAITING, RoomType.BLOOD, RoomType.BONE,
+               RoomType.BRAIN, RoomType.ADMITTANCE]:
+        _auto_room_action(gs, rt)
+
+    # Middle Manager: the room they're in at end of turn runs its auto-action a second time
+    mm = next((p for p in gs.players if p.role == Role.MIDDLE_MANAGER), None)
+    if mm is not None:
+        _auto_room_action(gs, mm.current_room)   # may no-op if nothing eligible
+
     # Tag newly discharge-ready patients
     for room in gs.rooms.values():
         for patient in room.queue:
@@ -919,7 +1091,7 @@ def resolve_end_of_game(gs):
         if patient.discharged or patient.admitted:
             survivors.append(patient)
             continue
-        if patient.cumulative_harm_total(gs.total_turns) >= PATIENT_HEALTH:
+        if patient.is_dead(gs.total_turns):
             deaths.append(patient)
         else:
             survivors.append(patient)
@@ -1148,7 +1320,13 @@ def render_players(gs):
     print(f"  {BOLD}Staff:{RESET}")
     for p in gs.players:
         c = ROOM_COLORS[p.current_room]
-        print(f"    Staff {p.id}: {c}{p.current_room.value}{RESET}")
+        name = p.role.value if p.role else f"Staff {p.id}"
+        hint = ""
+        if p.role in ACTIVE_ROLES:
+            hint = "  [a: ability]"
+            if p.role == Role.CPR and p.cpr_used:
+                hint = "  [CPR used]"
+        print(f"    {name}: {c}{p.current_room.value}{RESET}{DIM}{hint}{RESET}")
     print()
  
  
@@ -1182,6 +1360,8 @@ def render_action_menu(gs, pid):
     elif player.current_room == RoomType.ADMITTANCE:
         print(f"    {BOLD}d{RESET} - Room action: Transfer front patient out")
     print(f"    {BOLD}s{RESET} - Send patient to another room / Discharge")
+    if player.role in ACTIVE_ROLES:
+        print(f"    {BOLD}a{RESET} - Use ability ({player.role.value})")
     print(f"    {BOLD}k{RESET} - Call patient to this room")
     print(f"    {BOLD}r{RESET} - Rearrange queue in this room")
     print(f"    {BOLD}p{RESET} - Switch active player")
@@ -1548,7 +1728,7 @@ def render_audit_sequence(gs):
             _diagnose_card(gs, p, undiag[0])
 
         total_harm = p.cumulative_harm_total(gs.total_turns)
-        is_dead = total_harm >= PATIENT_HEALTH
+        is_dead = p.is_dead(gs.total_turns)
 
         sc = SEV_COLORS.get(p.severity, WHITE)
         if is_dead:
@@ -2721,7 +2901,62 @@ def run_interactive(seed=None):
                                 print(f"  {RED}{e}{RESET}")
                         else:
                             print(f"  {DIM}Cancelled.{RESET}")
- 
+
+            elif choice == "a":
+                if player.role not in ACTIVE_ROLES:
+                    print(f"  {RED}This staff member has no active ability.{RESET}")
+                else:
+                    try:
+                        if player.role == Role.CPR:
+                            eligible = [p for p in gs.get_room(player.current_room).queue
+                                        if p.death_turn is not None and gs.turn - p.death_turn <= CPR_WINDOW_TURNS]
+                            if not eligible:
+                                raise ActionError("No revivable patient in this room.")
+                            target = input_patient("CPR which patient", eligible)
+                            if target is not None:
+                                print(f"  {GREEN}{ability_cpr(gs, player, target)}{RESET}")
+                                action_taken = True
+                            else:
+                                print(f"  {DIM}Cancelled.{RESET}")
+                        elif player.role == Role.PHARMACIST:
+                            eligible = [p for p in gs.all_patients
+                                        if p.checked_in and not p.discharged and not p.admitted
+                                        and not p.is_dead(gs.turn)]
+                            if not eligible:
+                                raise ActionError("No living checked-in patient to treat.")
+                            target = input_patient("Treat which patient", eligible)
+                            if target is not None:
+                                print(f"  {GREEN}{ability_pharmacist(gs, player, target)}{RESET}")
+                                action_taken = True
+                            else:
+                                print(f"  {DIM}Cancelled.{RESET}")
+                        elif player.role == Role.FIRST_AIDER:
+                            eligible = [p for p in gs.all_patients
+                                        if not p.discharged and not p.admitted and p.is_fully_diagnosed
+                                        and p.cumulative_harm(gs.turn) <= FIRST_AIDER_DETERIORATION_MAX]
+                            if not eligible:
+                                raise ActionError("No eligible patient to discharge.")
+                            target = input_patient("Discharge which patient", eligible)
+                            if target is not None:
+                                print(f"  {GREEN}{ability_first_aider(gs, player, target)}{RESET}")
+                                action_taken = True
+                            else:
+                                print(f"  {DIM}Cancelled.{RESET}")
+                        elif player.role == Role.FAST_TRACK:
+                            eligible = [p for p in gs.all_patients
+                                        if p.checked_in and not p.discharged and not p.admitted
+                                        and not p.is_dead(gs.turn)]
+                            if not eligible:
+                                raise ActionError("No living checked-in patient to admit.")
+                            target = input_patient("Admit which patient", eligible)
+                            if target is not None:
+                                print(f"  {GREEN}{ability_fast_track(gs, player, target)}{RESET}")
+                                action_taken = True
+                            else:
+                                print(f"  {DIM}Cancelled.{RESET}")
+                    except ActionError as e:
+                        print(f"  {RED}{e}{RESET}")
+
             elif choice == "k":
                 others = [p for r in gs.rooms.values()
                           if r.room_type != player.current_room for p in r.queue]
