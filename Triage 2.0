@@ -76,6 +76,7 @@ PER_STAFF_ACTION_CAP = 5
 STAFF_BURNOUT_TURNS = 6        # turns a staff member must sit in one room to be a burnout candidate
 RESOURCE_STRAIN_TURNS = 2      # turns a strained room stays at 2-action diagnosis
 BUNSEN_SLEEP_TURNS = 2         # turns Bunsen can't be checked in
+PLAGUE_DURATION = 3            # turns a patient stays infected (then it burns out)
 
 # Harm table: (probability, sev1_harm, sev2_harm, sev3_harm)
 # Slight bump to severity 1 and 2 compared to original
@@ -204,6 +205,7 @@ class Patient:
     deterioration_offset: int = 0    # CPR: flat reduction to deterioration
     wr_turns: int = 0   # consecutive turns checked-in and sitting in the Waiting Room
     cannot_check_in_until: Optional[int] = None   # can't be checked in while gs.turn < this
+    plague_turns_left: int = 0   # >0 = infected; counts down to 0 (cured/burnt-out)
 
     @property
     def harm_rate(self) -> int:
@@ -542,6 +544,7 @@ def _serialize_patient(patient):
         "deterioration_offset": patient.deterioration_offset,
         "wr_turns": patient.wr_turns,
         "cannot_check_in_until": patient.cannot_check_in_until,
+        "plague_turns_left": patient.plague_turns_left,
     }
 
 
@@ -567,6 +570,7 @@ def _deserialize_patient(d):
     p.deterioration_offset = d.get("deterioration_offset", 0)
     p.wr_turns = d.get("wr_turns", 0)
     p.cannot_check_in_until = d.get("cannot_check_in_until")
+    p.plague_turns_left = d.get("plague_turns_left", 0)
     return p
 
 
@@ -1207,7 +1211,27 @@ def update_dwell_counters(gs):
             p.wr_turns = 0
 
 
+def process_plague(gs):
+    active = [p for p in gs.all_patients
+              if p.plague_turns_left > 0 and not p.discharged and not p.admitted]
+    if not active:
+        return
+    for room in gs.rooms.values():
+        if any(p in room.queue for p in active):
+            for q in room.queue:
+                if (q.checked_in and q.plague_turns_left == 0
+                        and not q.discharged and not q.admitted):
+                    q.plague_turns_left = PLAGUE_DURATION
+                    gs.log.append(f"[Plague] {q.name} catches it.")  # PLACEHOLDER
+    for p in active:
+        add_symptom_card(gs, p, SymptomType.BLOOD, face_up=False)
+        p.plague_turns_left -= 1
+        if p.plague_turns_left == 0:
+            gs.log.append(f"[Plague] {p.name} is over the worst of it.")  # PLACEHOLDER
+
+
 def end_turn(gs):
+    process_plague(gs)
     phase_auto_functions(gs)
     check_patient_deaths(gs)
     update_dwell_counters(gs)
@@ -1263,8 +1287,7 @@ def show_event_screen(gs, text, interactive=True):
 # ── Untriggered (base-layer) events (Change Doc 03b) ──
 
 UNTRIGGERED_POOL = ["POWER_FLICKER", "CONFUSED_ELDERLY", "STAFF_BURNOUT",
-                    "RESOURCE_SHORTAGE", "BRAWL", "DRUNK_BUNSEN"]
-# (Plague joins this list in 3d.)
+                    "RESOURCE_SHORTAGE", "BRAWL", "DRUNK_BUNSEN", "PLAGUE"]
 
 # Placeholder event-screen descriptions (writing tasks §2).
 UNTRIGGERED_SCREEN_TEXT = {
@@ -1274,6 +1297,7 @@ UNTRIGGERED_SCREEN_TEXT = {
     "RESOURCE_SHORTAGE": "[Resource Shortage: supplies are short — diagnosis is slower.]",
     "BRAWL": "[Brawl: a scuffle erupts in the Waiting Room.]",
     "DRUNK_BUNSEN": "[The Drunk: Bunsen has rolled in and passed out.]",
+    "PLAGUE": "[Plague: something contagious is loose in the Waiting Room.]",
 }
 
 
@@ -1286,6 +1310,10 @@ def _untriggered_has_target(gs, ev):
         return gs.get_room(RoomType.WAITING).patient_count >= 1
     if ev == "STAFF_BURNOUT":
         return bool(_burnout_candidates(gs))
+    if ev == "PLAGUE":
+        wr = gs.get_room(RoomType.WAITING)
+        return any(p.checked_in and not p.discharged and not p.admitted and p.plague_turns_left == 0
+                   for p in wr.queue)
     return True   # Power Flicker, Confused Elderly, Resource Shortage, Bunsen always apply
 
 
@@ -1346,6 +1374,15 @@ def apply_untriggered_event(gs, ev, break_no, interactive=True):
         gs.get_room(RoomType.WAITING).add_patient(b)
         gs.all_patients.append(b)
         gs.log.append("[Event] Bunsen has rolled in blind drunk and fallen asleep in the Waiting Room.")  # PLACEHOLDER
+
+    elif ev == "PLAGUE":
+        wr = gs.get_room(RoomType.WAITING)
+        candidates = [p for p in wr.queue if p.checked_in and not p.discharged
+                      and not p.admitted and p.plague_turns_left == 0]
+        patient = random.choice(candidates)
+        patient.plague_turns_left = PLAGUE_DURATION
+        gs.log.append(f"[Event] {patient.name} has come down with something badly contagious — "
+                      f"a plague is loose in the Waiting Room.")  # PLACEHOLDER
 
     if interactive:
         show_event_screen(gs, UNTRIGGERED_SCREEN_TEXT.get(ev, f"[{ev}]"))   # PLACEHOLDER (writing tasks §2)
@@ -1508,7 +1545,7 @@ def resolve_end_of_game(gs):
             deaths.append(patient)
         else:
             survivors.append(patient)
-    won = len(deaths) <= DEATH_THRESHOLD and not gs.all_three_lost
+    won = len(deaths) <= DEATH_THRESHOLD
     return {
         "deaths": deaths,
         "death_count": len(deaths),
@@ -1661,6 +1698,7 @@ def render_patient_line(gs, patient, prefix, detail=True):
  
     is_dead = ch >= hp
     dead_str = f" {BG_RED}{WHITE}{BOLD} DEAD {RESET}" if is_dead else ""
+    plague_str = f" {BG_RED}{WHITE}{BOLD} PLAGUE ({patient.plague_turns_left}) {RESET}" if patient.plague_turns_left > 0 else ""
  
     # Smell check: dead patient in waiting room for 3+ turns
     smell_str = ""
@@ -1683,7 +1721,7 @@ def render_patient_line(gs, patient, prefix, detail=True):
             status = f"{YELLOW}NEEDS ADMITTANCE{RESET}"
  
     print(f"{prefix}{BOLD}{patient.name}{RESET} "
-          f"Sev:{sc}{patient.severity}{RESET} HR:{hr} [{hbar}] {ch}/{hp}{dead_str} {status}"
+          f"Sev:{sc}{patient.severity}{RESET} HR:{hr} [{hbar}] {ch}/{hp}{dead_str}{plague_str} {status}"
           f"{smell_str}")
  
     if detail:
@@ -2177,6 +2215,11 @@ def render_end_of_game(gs, result):
     clear_screen()
     print(f"{BOLD}{CYAN}{'=' * 60}{RESET}")
  
+    if result.get("all_three_lost"):
+        gs.log.append("[Achievement] Health & Safety (hidden) — all three staff lost to the spill.")
+        if result["won"]:
+            gs.log.append("[Achievement] [name TBD] (hidden, RAREST) — won despite losing all three staff.")
+
     if result["won"]:
         # ── Win Screen ──
         print(f"{BOLD}  CONGRATULATIONS — YOU SURVIVED YOUR SHIFT!{RESET}")
@@ -2184,13 +2227,17 @@ def render_end_of_game(gs, result):
         print()
         print(f"  {BG_GREEN}{WHITE}{BOLD} VICTORY {RESET}")
         print()
+        if result.get("all_three_lost"):
+            print(f"  {YELLOW}{BOLD}All three staff lost to the sanitiser spill...{RESET}")
+            print(f"  {YELLOW}{BOLD}...and yet the patients survived. Incredible.{RESET}")
+            print()
         print(f"  {DIM}Clearly things aren't too bad in this part of the country.{RESET}")
         print(f"  {DIM}Your funding has been reduced.{RESET}")
         print()
         render_statistics(stats)
         print(f"  {DIM}Press Enter to play again.{RESET}")
         print(f"{CYAN}{'=' * 60}{RESET}")
- 
+
     else:
         # ── Lose Screen ──
         print(f"{BOLD}  GAME OVER{RESET}")
