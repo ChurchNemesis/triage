@@ -61,6 +61,22 @@ ABILITY_COST = {               # action cost of each ACTIVE ability
     "PHARMACIST": 3,
 }
 
+# Events / karmic tokens (Change Doc 03a)
+FAG_BREAK_AFTER_TURNS = {3, 6, 9}   # break fires after end-of-turn 3, 6, 9 (B1/B2/B3)
+KARMIC_PCT_PER_TOKEN = 0.20
+WALLFLOWER_WR_TURNS = 6             # turns loitering in the Waiting Room to qualify
+UNCHECKED_AGGRO_TURNS = 3          # turns unchecked-in to qualify
+SICKER_RETURN_START_DETERIORATION = 4   # deterioration a Sicker Returner re-enters with [CONFIRM/tune]
+
+# Action economy (REVISED v1.9.2): shared pool of 12, per-staff cap of 5/turn
+SHARED_ACTION_POOL = 12
+PER_STAFF_ACTION_CAP = 5
+
+# Untriggered (base-layer) events (Change Doc 03b)
+STAFF_BURNOUT_TURNS = 6        # turns a staff member must sit in one room to be a burnout candidate
+RESOURCE_STRAIN_TURNS = 2      # turns a strained room stays at 2-action diagnosis
+BUNSEN_SLEEP_TURNS = 2         # turns Bunsen can't be checked in
+
 # Harm table: (probability, sev1_harm, sev2_harm, sev3_harm)
 # Slight bump to severity 1 and 2 compared to original
 SYMPTOM_HARM_TABLE = [
@@ -186,6 +202,8 @@ class Patient:
     ready_for_discharge_turn: Optional[int] = None # turn when first tagged discharge-ready
     harm_rate_offset: int = 0        # Pharmacist: persistent -1s to harm rate
     deterioration_offset: int = 0    # CPR: flat reduction to deterioration
+    wr_turns: int = 0   # consecutive turns checked-in and sitting in the Waiting Room
+    cannot_check_in_until: Optional[int] = None   # can't be checked in while gs.turn < this
 
     @property
     def harm_rate(self) -> int:
@@ -267,8 +285,31 @@ class Player:
     action_count: int = 0
     role: Optional["Role"] = None
     cpr_used: bool = False     # senior only
- 
- 
+    actions_this_turn: int = 0                      # reset each turn; capped at PER_STAFF_ACTION_CAP
+    unavailable_until_turn: Optional[int] = None    # unavailable while gs.turn <= this
+    room_turns: int = 0    # consecutive turns spent in the current room without moving
+
+
+def player_available(gs, player) -> bool:
+    return player.unavailable_until_turn is None or gs.turn > player.unavailable_until_turn
+
+
+def make_unavailable(gs, player, turns: int):
+    player.unavailable_until_turn = gs.turn + turns
+
+
+def spend_actions(gs, player, cost=1):
+    if not player_available(gs, player):
+        raise ActionError("That staff member is unavailable this turn.")
+    if gs.actions_remaining < cost:
+        raise ActionError("No actions remaining.")
+    if player.actions_this_turn + cost > PER_STAFF_ACTION_CAP:
+        raise ActionError(f"That staff member can't do more than {PER_STAFF_ACTION_CAP} actions this turn.")
+    gs.actions_remaining -= cost
+    player.actions_this_turn += cost
+    player.action_count += cost
+
+
 # ═══════════════════════════════════════════════════════════════
 # DECK GENERATION
 # ═══════════════════════════════════════════════════════════════
@@ -346,8 +387,24 @@ def generate_patient_deck(total=None):
         patients.append(Patient(id=i + 1, name=names[i], severity=sev, initial_symptoms=init_symp))
     random.shuffle(patients)
     return patients
- 
- 
+
+
+def _make_patient(gs, name=None, severity=None):
+    """Spawn a well-formed patient mid-game (Confused Elderly, Bunsen)."""
+    stypes = [SymptomType.BLOOD, SymptomType.BONE, SymptomType.BRAIN]
+    if severity is None:
+        severity = random.choices([1, 2, 3], weights=[SEVERITY_WEIGHTS[s] for s in (1, 2, 3)], k=1)[0]
+    r = random.random()
+    if r < SINGLE_SYMPTOM_RATIO:
+        init = [random.choice(stypes)]
+    elif r < MULTI_SYMPTOM_2_RATIO:
+        init = random.choices(stypes, k=2)
+    else:
+        init = random.choices(stypes, k=3)
+    new_id = max([p.id for p in gs.all_patients] + [p.id for p in gs.patient_deck], default=0) + 1
+    return Patient(id=new_id, name=name or f"Patient #{new_id}", severity=severity, initial_symptoms=init)
+
+
 # ═══════════════════════════════════════════════════════════════
 # GAME ENGINE
 # ═══════════════════════════════════════════════════════════════
@@ -369,7 +426,12 @@ class GameState:
     symptom_discards: dict = field(default_factory=dict)
     all_patients: list = field(default_factory=list)
     log: list = field(default_factory=list)
- 
+    sicker_returner_tokens: list = field(default_factory=list)  # banked: Patient objects discharged sick
+    disabled_events: set = field(default_factory=set)           # event types that have fired (no-repeat)
+    used_untriggered: set = field(default_factory=set)          # untriggered events already drawn (no-repeat)
+    power_flicker_turn: Optional[int] = None          # auto-functions suppressed on this turn
+    resource_strained: dict = field(default_factory=dict)  # RoomType -> turn the strain expires (exclusive)
+
     @property
     def shift_hour(self) -> str:
         h = (self.shift_start_hour + self.turn) % 24
@@ -407,7 +469,7 @@ def create_game(seed=None, late_for_work=False):
     for st in SymptomType:
         gs.symptom_decks[st] = generate_symptom_deck(st)
         gs.symptom_discards[st] = []
-    gs.actions_remaining = NUM_PLAYERS * ACTIONS_PER_PLAYER
+    gs.actions_remaining = SHARED_ACTION_POOL
 
     if late_for_work:
         gs.shift_start_hour = 20  # late start: turn 1 displays as 9:00 PM
@@ -472,6 +534,8 @@ def _serialize_patient(patient):
         "ready_for_discharge_turn": patient.ready_for_discharge_turn,
         "harm_rate_offset": patient.harm_rate_offset,
         "deterioration_offset": patient.deterioration_offset,
+        "wr_turns": patient.wr_turns,
+        "cannot_check_in_until": patient.cannot_check_in_until,
     }
 
 
@@ -495,6 +559,8 @@ def _deserialize_patient(d):
     p.ready_for_discharge_turn = d["ready_for_discharge_turn"]
     p.harm_rate_offset = d.get("harm_rate_offset", 0)
     p.deterioration_offset = d.get("deterioration_offset", 0)
+    p.wr_turns = d.get("wr_turns", 0)
+    p.cannot_check_in_until = d.get("cannot_check_in_until")
     return p
 
 
@@ -526,7 +592,15 @@ def save_game(gs, active_player_id, slot_name=None):
         "players": [{"id": p.id, "current_room": p.current_room.value,
                       "action_count": p.action_count,
                       "role": p.role.value if p.role else None,
-                      "cpr_used": p.cpr_used} for p in gs.players],
+                      "cpr_used": p.cpr_used,
+                      "actions_this_turn": p.actions_this_turn,
+                      "unavailable_until_turn": p.unavailable_until_turn,
+                      "room_turns": p.room_turns} for p in gs.players],
+        "sicker_returner_tokens": [p.id for p in gs.sicker_returner_tokens],
+        "disabled_events": sorted(gs.disabled_events),
+        "used_untriggered": sorted(gs.used_untriggered),
+        "power_flicker_turn": gs.power_flicker_turn,
+        "resource_strained": {rt.value: t for rt, t in gs.resource_strained.items()},
         "all_patients": [_serialize_patient(p) for p in gs.all_patients],
         "patient_deck": [_serialize_patient(p) for p in gs.patient_deck],
         "rooms": room_data,
@@ -565,7 +639,10 @@ def load_game(filepath):
         p = Player(id=pd["id"], current_room=RoomType(pd["current_room"]),
                    action_count=pd["action_count"],
                    role=Role(pd["role"]) if pd.get("role") else None,
-                   cpr_used=pd.get("cpr_used", False))
+                   cpr_used=pd.get("cpr_used", False),
+                   actions_this_turn=pd.get("actions_this_turn", 0),
+                   unavailable_until_turn=pd.get("unavailable_until_turn"),
+                   room_turns=pd.get("room_turns", 0))
         gs.players.append(p)
 
     # Restore all_patients (the canonical patient objects)
@@ -603,6 +680,14 @@ def load_game(filepath):
 
     # Restore log
     gs.log = data["log"]
+
+    # Restore event / karmic token state
+    gs.sicker_returner_tokens = [patient_lookup[pid] for pid in data.get("sicker_returner_tokens", [])
+                                 if pid in patient_lookup]
+    gs.disabled_events = set(data.get("disabled_events", []))
+    gs.used_untriggered = set(data.get("used_untriggered", []))
+    gs.power_flicker_turn = data.get("power_flicker_turn")
+    gs.resource_strained = {RoomType(k): t for k, t in data.get("resource_strained", {}).items()}
 
     # Restore random state
     random_state = (3, tuple(data["random_state"]), data["random_pos"])
@@ -666,33 +751,35 @@ def check_patient_deaths(gs):
 # ── Player Actions ──
  
 def action_move(gs, player, target_room):
-    if gs.actions_remaining <= 0:
-        raise ActionError("No actions remaining.")
     if target_room not in ADJACENT[player.current_room]:
         raise ActionError(f"Cannot move directly from {player.current_room.value} to "
                           f"{target_room.value}. Must pass through Waiting Room.")
+    spend_actions(gs, player, 1)
     old = player.current_room
     player.current_room = target_room
-    gs.actions_remaining -= 1
-    player.action_count += 1
+    player.room_turns = 0
     msg = f"Staff {player.id} moved from {old.value} to {target_room.value}."
     gs.log.append(msg)
     return msg
  
  
 def action_check_in(gs, player):
-    if gs.actions_remaining <= 0:
-        raise ActionError("No actions remaining.")
     if player.current_room != RoomType.WAITING:
         raise ActionError("Must be in the Waiting Room to check in patients.")
     waiting = gs.get_room(RoomType.WAITING)
     target = next((p for p in waiting.queue if not p.checked_in), None)
     if target is None:
         raise ActionError("No unchecked patients in the Waiting Room.")
+    # Bunsen (03b): a sleeping front patient can't be checked in — the attempt
+    # still costs the action and fails (bible: "you can spend an action trying").
+    if target.cannot_check_in_until is not None and gs.turn < target.cannot_check_in_until:
+        spend_actions(gs, player, 1)
+        msg = f"Staff {player.id} tries to wake {target.name}, but he's out for the count."  # PLACEHOLDER
+        gs.log.append(msg)
+        return msg
+    spend_actions(gs, player, 1)
     target.checked_in = True
     assign_symptom_cards(gs, target)
-    gs.actions_remaining -= 1
-    player.action_count += 1
     msg = (f"Staff {player.id} checked in {target.name} (Severity {target.severity}, "
            f"{len(target.symptom_cards)} symptom{'s' if len(target.symptom_cards) != 1 else ''}: "
            f"{', '.join(c.symptom_type.value for c in target.symptom_cards)}).")
@@ -700,10 +787,13 @@ def action_check_in(gs, player):
     return msg
  
  
+def _room_strained(gs, rt):
+    """True while a diagnosis room is resource-strained (Resource Shortage, 03b)."""
+    return gs.resource_strained.get(rt, 0) > gs.turn
+
+
 def action_diagnose(gs, player):
     """Diagnose up to 2 matching symptom cards on front-of-queue patient."""
-    if gs.actions_remaining <= 0:
-        raise ActionError("No actions remaining.")
     rt = player.current_room
     if rt not in ROOM_TO_SYMPTOM:
         raise ActionError(f"Cannot diagnose in {rt.value}.")
@@ -717,6 +807,10 @@ def action_diagnose(gs, player):
     matching = [c for c in patient.symptom_cards if not c.face_up and c.symptom_type == stype]
     if not matching:
         raise ActionError(f"{patient.name} has no undiagnosed {stype.value} symptoms.")
+    # Resource Shortage (03b): strained diagnosis rooms cost 2 actions. Charge
+    # before mutating so a failed spend doesn't leave a free diagnosis.
+    cost = 2 if _room_strained(gs, rt) else 1
+    spend_actions(gs, player, cost)
     # Diagnose up to 2 matching cards
     diagnosed = []
     for card in matching[:2]:
@@ -732,8 +826,6 @@ def action_diagnose(gs, player):
     else:
         room.remove_patient(patient)
         gs.get_room(RoomType.WAITING).add_patient(patient)
-    gs.actions_remaining -= 1
-    player.action_count += 1
     where = f"Kept in {rt.value} (Specialist)." if retained else "Patient returned to Waiting Room."
     if len(diagnosed) == 1:
         card, harm = diagnosed[0]
@@ -752,19 +844,16 @@ def action_diagnose(gs, player):
  
 def action_admit(gs, player):
     """Transfer front patient out of game from Admittance room."""
-    if gs.actions_remaining <= 0:
-        raise ActionError("No actions remaining.")
     if player.current_room != RoomType.ADMITTANCE:
         raise ActionError("Must be in Admittance to transfer patients.")
     admittance = gs.get_room(RoomType.ADMITTANCE)
     if not admittance.queue:
         raise ActionError("No patients in Admittance.")
+    spend_actions(gs, player, 1)
     patient = admittance.queue[0]
     admittance.remove_patient(patient)
     patient.admitted = True
     patient.admitted_turn = gs.turn
-    gs.actions_remaining -= 1
-    player.action_count += 1
     msg = f"Staff {player.id} transferred {patient.name} out from Admittance."
     gs.log.append(msg)
     return msg
@@ -781,27 +870,24 @@ def action_send(gs, player, patient, target_room):
         current.remove_patient(patient)
         patient.discharged = True
         patient.discharge_turn = gs.turn
+        if "SICKER_RETURNER" not in gs.disabled_events and patient.cumulative_harm(gs.turn) > 0:
+            gs.sicker_returner_tokens.append(patient)
         msg = f"Staff {player.id} discharged {patient.name}."
         gs.log.append(msg)
         return msg
     # Send to another room — costs 1 action
-    if gs.actions_remaining <= 0:
-        raise ActionError("No actions remaining.")
     target = gs.get_room(target_room)
     if target.is_full:
         raise ActionError(f"{target_room.value} is full ({target.capacity} patients).")
+    spend_actions(gs, player, 1)
     current.remove_patient(patient)
     target.add_patient(patient)
-    gs.actions_remaining -= 1
-    player.action_count += 1
     msg = f"Staff {player.id} sent {patient.name} to {target_room.value}."
     gs.log.append(msg)
     return msg
  
  
 def action_call(gs, player, patient):
-    if gs.actions_remaining <= 0:
-        raise ActionError("No actions remaining.")
     player_room = gs.get_room(player.current_room)
     if player_room.is_full:
         raise ActionError(f"{player.current_room.value} is full.")
@@ -810,24 +896,20 @@ def action_call(gs, player, patient):
         raise ActionError(f"{patient.name} is not in any room.")
     if source.room_type == player.current_room:
         raise ActionError(f"{patient.name} is already in {player.current_room.value}.")
+    spend_actions(gs, player, 1)
     source.remove_patient(patient)
     player_room.add_patient(patient)
-    gs.actions_remaining -= 1
-    player.action_count += 1
     msg = f"Staff {player.id} called {patient.name} from {source.room_type.value} to {player.current_room.value}."
     gs.log.append(msg)
     return msg
  
  
 def action_rearrange(gs, player, new_order):
-    if gs.actions_remaining <= 0:
-        raise ActionError("No actions remaining.")
     room = gs.get_room(player.current_room)
     if sorted(p.id for p in new_order) != sorted(p.id for p in room.queue):
         raise ActionError("New order must contain exactly the same patients.")
+    spend_actions(gs, player, 1)
     room.queue = list(new_order)
-    gs.actions_remaining -= 1
-    player.action_count += 1
     msg = f"Staff {player.id} rearranged {player.current_room.value} queue: {', '.join(p.name for p in new_order)}."
     gs.log.append(msg)
     return msg
@@ -847,14 +929,11 @@ def ability_cpr(gs, player, patient):
     if patient not in gs.get_room(player.current_room).queue:
         raise ActionError(f"{patient.name} is not in {player.current_room.value}.")
     cost = ABILITY_COST["CPR"]
-    if gs.actions_remaining < cost:
-        raise ActionError("Not enough actions for CPR.")
+    spend_actions(gs, player, cost)
     raw = patient.harm_rate * (gs.turn - patient.arrival_turn)
     patient.deterioration_offset = max(0, raw - CPR_REVIVE_TARGET)
     patient.death_turn = None
     patient.ready_for_discharge_turn = None
-    gs.actions_remaining -= cost
-    player.action_count += cost
     player.cpr_used = True
     msg = f"CPR! {patient.name} is back."
     gs.log.append(msg)
@@ -869,11 +948,8 @@ def ability_pharmacist(gs, player, patient):
     if patient.is_dead(gs.turn):
         raise ActionError("Can't medicate the dead.")
     cost = ABILITY_COST["PHARMACIST"]
-    if gs.actions_remaining < cost:
-        raise ActionError("Not enough actions.")
+    spend_actions(gs, player, cost)
     patient.harm_rate_offset += PHARMACIST_HARM_REDUCTION
-    gs.actions_remaining -= cost
-    player.action_count += cost
     msg = f"Pharmacist treated {patient.name} (harm -{PHARMACIST_HARM_REDUCTION})."
     gs.log.append(msg)
     return msg
@@ -887,13 +963,12 @@ def ability_first_aider(gs, player, patient):
     if patient.cumulative_harm(gs.turn) > FIRST_AIDER_DETERIORATION_MAX:
         raise ActionError(f"{patient.name} is too far gone for First Aider (must be <= {FIRST_AIDER_DETERIORATION_MAX}).")
     cost = ABILITY_COST["FIRST_AIDER"]
-    if gs.actions_remaining < cost:
-        raise ActionError("Not enough actions.")
+    spend_actions(gs, player, cost)
     gs.find_patient_room(patient).remove_patient(patient)
     patient.discharged = True
     patient.discharge_turn = gs.turn
-    gs.actions_remaining -= cost
-    player.action_count += cost
+    if "SICKER_RETURNER" not in gs.disabled_events and patient.cumulative_harm(gs.turn) > 0:
+        gs.sicker_returner_tokens.append(patient)
     msg = f"First Aider discharged {patient.name}."
     gs.log.append(msg)
     return msg
@@ -907,13 +982,10 @@ def ability_fast_track(gs, player, patient):
     if patient.is_dead(gs.turn):
         raise ActionError("Can't admit the dead.")
     cost = ABILITY_COST["FAST_TRACK"]
-    if gs.actions_remaining < cost:
-        raise ActionError("Not enough actions.")
+    spend_actions(gs, player, cost)
     gs.find_patient_room(patient).remove_patient(patient)
     patient.admitted = True
     patient.admitted_turn = gs.turn
-    gs.actions_remaining -= cost
-    player.action_count += cost
     msg = f"Fast-Track admitted {patient.name}."
     gs.log.append(msg)
     return msg
@@ -953,9 +1025,10 @@ def _auto_room_action(gs, rt):
     waiting = gs.get_room(RoomType.WAITING)
 
     if rt == RoomType.WAITING:
-        # Check in the first not-yet-checked-in patient.
+        # Check in the first not-yet-checked-in patient (skip sleeping patients, e.g. Bunsen).
         for patient in waiting.queue:
-            if not patient.checked_in:
+            if not patient.checked_in and (patient.cannot_check_in_until is None
+                                           or gs.turn >= patient.cannot_check_in_until):
                 patient.checked_in = True
                 assign_symptom_cards(gs, patient)
                 gs.log.append(f"[Auto] Waiting Room checked in {patient.name} "
@@ -1009,15 +1082,21 @@ def _auto_room_action(gs, rt):
 
 
 def phase_auto_functions(gs):
-    # Each room performs its auto-action once, in the established order.
-    for rt in [RoomType.WAITING, RoomType.BLOOD, RoomType.BONE,
-               RoomType.BRAIN, RoomType.ADMITTANCE]:
-        _auto_room_action(gs, rt)
+    # Power Flicker (03b): on the flicker turn, no room auto-functions run; the
+    # discharge-ready tagging and storm-out blocks below still happen.
+    if gs.power_flicker_turn == gs.turn:
+        gs.log.append("[Auto] Power's out — no room auto-functions this turn.")
+    else:
+        # Each room performs its auto-action once, in the established order.
+        for rt in [RoomType.WAITING, RoomType.BLOOD, RoomType.BONE,
+                   RoomType.BRAIN, RoomType.ADMITTANCE]:
+            _auto_room_action(gs, rt)
 
-    # Middle Manager: the room they're in at end of turn runs its auto-action a second time
-    mm = next((p for p in gs.players if p.role == Role.MIDDLE_MANAGER), None)
-    if mm is not None:
-        _auto_room_action(gs, mm.current_room)   # may no-op if nothing eligible
+        # Middle Manager: the room they're in at end of turn runs its auto-action a second time
+        # (an unavailable Middle Manager does not double their room).
+        mm = next((p for p in gs.players if p.role == Role.MIDDLE_MANAGER), None)
+        if mm is not None and player_available(gs, mm):
+            _auto_room_action(gs, mm.current_room)   # may no-op if nothing eligible
 
     # Tag newly discharge-ready patients
     for room in gs.rooms.values():
@@ -1045,7 +1124,11 @@ def phase_auto_functions(gs):
  
 def begin_turn(gs):
     gs.turn += 1
-    gs.actions_remaining = NUM_PLAYERS * ACTIONS_PER_PLAYER
+    for p in gs.players:
+        p.actions_this_turn = 0
+        p.room_turns += 1
+    available = sum(1 for p in gs.players if player_available(gs, p))
+    gs.actions_remaining = min(SHARED_ACTION_POOL, PER_STAFF_ACTION_CAP * available)
     gs.log.append(f"\n{'=' * 50}")
     gs.log.append(f"TURN {gs.turn} of {gs.total_turns} -- {gs.shift_hour}")
     gs.log.append(f"{'=' * 50}")
@@ -1058,11 +1141,268 @@ def begin_turn(gs):
         gs.log.append("Final turn -- no new arrivals.")
  
  
+def update_dwell_counters(gs):
+    wr = gs.get_room(RoomType.WAITING)
+    for p in gs.all_patients:
+        if p in wr.queue and p.checked_in and not p.discharged and not p.admitted:
+            p.wr_turns += 1
+        else:
+            p.wr_turns = 0
+
+
 def end_turn(gs):
     phase_auto_functions(gs)
     check_patient_deaths(gs)
- 
- 
+    update_dwell_counters(gs)
+
+
+# ═══════════════════════════════════════════════════════════════
+# EVENTS — fag breaks + karmic token system (Change Doc 03a)
+# ═══════════════════════════════════════════════════════════════
+# NOTE: all player-facing strings here are PLACEHOLDERS. Final prose
+# (monologues, event screens) is tracked in triage_writing_tasks.md.
+
+def _break_pause(interactive):
+    """Wait for Enter between break screens (no-op in headless/sim mode)."""
+    if interactive:
+        input()
+
+
+def show_smoke_break_monologue(gs, break_no, interactive=True):
+    """The staged smoke-break screens (bible §7.1). PLACEHOLDER scaffold only."""
+    if not interactive:
+        return
+    # Shrinking-cigarette scaffold: cigarette gets shorter each screen.
+    cig_states = ["[=========|>", "[======|>", "[===|>", "[|>"]
+    lines = [
+        f"[SMOKE BREAK {break_no} — placeholder monologue line 1]",
+        f"[placeholder monologue line 2]",
+        f"[placeholder monologue line 3]",
+        f"[back to it...]",
+    ]
+    for cig, line in zip(cig_states, lines):
+        clear_screen()
+        print()
+        print(centre_text(f"{DIM}{cig}{RESET}"))
+        print()
+        print(centre_text(line))
+        print()
+        print(centre_text(f"{DIM}(press Enter){RESET}"))
+        _break_pause(interactive)
+
+
+def show_event_screen(gs, text, interactive=True):
+    """Event reveal screen after the monologue (bible §7.1). PLACEHOLDER."""
+    if not interactive:
+        return
+    clear_screen()
+    print()
+    print(centre_text(f"{BOLD}{YELLOW}{text}{RESET}"))
+    print()
+    print(centre_text(f"{DIM}(press Enter){RESET}"))
+    _break_pause(interactive)
+
+
+# ── Untriggered (base-layer) events (Change Doc 03b) ──
+
+UNTRIGGERED_POOL = ["POWER_FLICKER", "CONFUSED_ELDERLY", "STAFF_BURNOUT",
+                    "RESOURCE_SHORTAGE", "BRAWL", "DRUNK_BUNSEN"]
+# (Plague joins this list in 3d.)
+
+# Placeholder event-screen descriptions (writing tasks §2).
+UNTRIGGERED_SCREEN_TEXT = {
+    "POWER_FLICKER": "[Power Flicker: the lights die — systems down next turn.]",
+    "CONFUSED_ELDERLY": "[Confused Elderly: someone has wandered into the wrong room.]",
+    "STAFF_BURNOUT": "[Staff Burnout: a staff member is spent and off next turn.]",
+    "RESOURCE_SHORTAGE": "[Resource Shortage: supplies are short — diagnosis is slower.]",
+    "BRAWL": "[Brawl: a scuffle erupts in the Waiting Room.]",
+    "DRUNK_BUNSEN": "[The Drunk: Bunsen has rolled in and passed out.]",
+}
+
+
+def _burnout_candidates(gs):
+    return [p for p in gs.players if player_available(gs, p) and p.room_turns >= STAFF_BURNOUT_TURNS]
+
+
+def _untriggered_has_target(gs, ev):
+    if ev == "BRAWL":
+        return gs.get_room(RoomType.WAITING).patient_count >= 1
+    if ev == "STAFF_BURNOUT":
+        return bool(_burnout_candidates(gs))
+    return True   # Power Flicker, Confused Elderly, Resource Shortage, Bunsen always apply
+
+
+def draw_and_apply_untriggered_event(gs, break_no, interactive=True):
+    pool = [e for e in UNTRIGGERED_POOL if e not in gs.used_untriggered]
+    if not pool:
+        return None
+    ev = random.choice(pool)
+    # Staff Burnout RE-ROLLS to a different event if no qualifying staff (bible §7.2).
+    if ev == "STAFF_BURNOUT" and not _untriggered_has_target(gs, ev):
+        alt = [e for e in pool if e != "STAFF_BURNOUT"]
+        ev = random.choice(alt) if alt else None
+    # Everything else FIZZLES if it has no valid target (bible §7.5) — break happens, no event, not consumed.
+    if ev is None or not _untriggered_has_target(gs, ev):
+        return None
+    gs.used_untriggered.add(ev)
+    apply_untriggered_event(gs, ev, break_no, interactive)
+    return ev
+
+
+def apply_untriggered_event(gs, ev, break_no, interactive=True):
+    if ev == "POWER_FLICKER":
+        gs.power_flicker_turn = gs.turn + 1   # next turn's room auto-functions are suppressed
+        gs.log.append("[Event] The lights flicker; systems will be down next turn.")  # PLACEHOLDER
+
+    elif ev == "CONFUSED_ELDERLY":
+        room = random.choice([RoomType.BLOOD, RoomType.BONE, RoomType.BRAIN])
+        p = _make_patient(gs)              # arrives unchecked (face-down), like a normal new patient
+        p.arrival_turn = gs.turn
+        gs.get_room(room).add_patient(p)
+        gs.all_patients.append(p)
+        gs.log.append(f"[Event] A confused elderly patient has wandered into {room.value}.")  # PLACEHOLDER
+
+    elif ev == "STAFF_BURNOUT":
+        make_unavailable(gs, random.choice(_burnout_candidates(gs)), 1)
+        gs.log.append("[Event] A staff member has burned out — off next turn.")  # PLACEHOLDER
+
+    elif ev == "RESOURCE_SHORTAGE":
+        k = random.choice([1, 2])
+        for rt in random.sample([RoomType.BLOOD, RoomType.BONE, RoomType.BRAIN], k):
+            gs.resource_strained[rt] = gs.turn + RESOURCE_STRAIN_TURNS
+        gs.log.append("[Event] Supplies are short — some rooms are resource-strained (diagnosis costs 2).")  # PLACEHOLDER
+
+    elif ev == "BRAWL":
+        wr = gs.get_room(RoomType.WAITING)
+        present = [p for p in wr.queue if not p.discharged and not p.admitted]
+        if len(present) >= 2:
+            for p in random.sample(present, 2):
+                add_symptom_card(gs, p, SymptomType.BONE, face_up=False)   # 1 each (face-down, §7.5)
+        elif len(present) == 1:
+            add_symptom_card(gs, present[0], SymptomType.BONE, face_up=False)  # lone patient punches a wall
+        gs.log.append("[Event] A brawl breaks out in the Waiting Room.")  # PLACEHOLDER
+
+    elif ev == "DRUNK_BUNSEN":
+        b = _make_patient(gs, name="Bunsen", severity=2)
+        b.arrival_turn = gs.turn
+        b.cannot_check_in_until = gs.turn + BUNSEN_SLEEP_TURNS
+        gs.get_room(RoomType.WAITING).add_patient(b)
+        gs.all_patients.append(b)
+        gs.log.append("[Event] Bunsen has rolled in blind drunk and fallen asleep in the Waiting Room.")  # PLACEHOLDER
+
+    if interactive:
+        show_event_screen(gs, UNTRIGGERED_SCREEN_TEXT.get(ev, f"[{ev}]"))   # PLACEHOLDER (writing tasks §2)
+
+
+def run_fag_break(gs, break_no, interactive=True):
+    # 1) Smoke-break monologue — PLACEHOLDER prose (writing tasks §1)
+    show_smoke_break_monologue(gs, break_no, interactive=interactive)
+    # 2) Base untriggered event (the base layer) — implemented in 03b
+    draw_and_apply_untriggered_event(gs, break_no, interactive=interactive)   # 03b STUB: no-op for now
+    # 3) Karmic event on top
+    resolve_karmic_event(gs, break_no, interactive=interactive)
+
+
+# ── Karmic token system ──
+
+def live_token_counts(gs):
+    counts = {}
+    if "WALLFLOWER" not in gs.disabled_events:
+        n = sum(1 for p in gs.all_patients
+                if not p.discharged and not p.admitted and p.checked_in
+                and p in gs.get_room(RoomType.WAITING).queue and p.wr_turns >= WALLFLOWER_WR_TURNS)
+        if n:
+            counts["WALLFLOWER"] = n
+    if "UNCHECKED" not in gs.disabled_events:
+        n = sum(1 for p in gs.all_patients
+                if not p.discharged and not p.admitted and not p.checked_in
+                and p.arrival_turn is not None and (gs.turn - p.arrival_turn) >= UNCHECKED_AGGRO_TURNS
+                and (p.cannot_check_in_until is None or gs.turn >= p.cannot_check_in_until))
+        if n:
+            counts["UNCHECKED"] = n
+    # SPILL is added here by 03c
+    return counts
+
+
+def resolve_karmic_event(gs, break_no, interactive=True):
+    counts = dict(live_token_counts(gs))
+    n_sicker = 0 if "SICKER_RETURNER" in gs.disabled_events else len(gs.sicker_returner_tokens)
+    if n_sicker:
+        counts["SICKER_RETURNER"] = n_sicker
+    N = sum(counts.values())
+    if N == 0:
+        return
+    if random.random() >= min(1.0, N * KARMIC_PCT_PER_TOKEN):
+        return  # no karmic event this break
+    # weighted pick by token count across types
+    event_type = random.choices(list(counts.keys()), weights=list(counts.values()), k=1)[0]
+    apply_triggered_event(gs, event_type, interactive=interactive)
+    gs.disabled_events.add(event_type)   # no repeats: type disabled for the rest of the game
+    if event_type == "SICKER_RETURNER":
+        gs.sicker_returner_tokens.clear()  # discard the rest too (no-repeat)
+
+
+# ── Triggered-event effects ──
+
+def add_symptom_card(gs, patient, stype, face_up=True):
+    card = _draw(gs, stype)
+    card.face_up = face_up
+    patient.symptom_cards.append(card)
+    return card
+
+
+def _make_one_staff_unavailable(gs, turns):
+    avail = [p for p in gs.players if player_available(gs, p)]
+    if len(avail) > 1:                 # never strand the player with zero staff
+        make_unavailable(gs, random.choice(avail), turns)
+
+
+def apply_triggered_event(gs, event_type, interactive=True):
+    if event_type == "SICKER_RETURNER":
+        patient = random.choice(gs.sicker_returner_tokens)
+        patient.discharged = False
+        patient.discharge_turn = None
+        patient.death_turn = None
+        patient.checked_in = True
+        for c in patient.symptom_cards:
+            c.face_up = True                       # previous symptoms restored, revealed
+        patient.severity = min(3, patient.severity + 1)
+        add_symptom_card(gs, patient, random.choice(list(SymptomType)), face_up=False)  # face-down: can't be re-discharged on arrival
+        patient.wr_turns = 0
+        patient.harm_rate_offset = 0
+        patient.deterioration_offset = -SICKER_RETURN_START_DETERIORATION  # re-enters already deteriorating
+        patient.arrival_turn = gs.turn
+        gs.get_room(RoomType.WAITING).add_patient(patient)
+        gs.log.append(f"[Karma] {patient.name} is back, and worse.")   # PLACEHOLDER (writing tasks §2)
+        show_event_screen(gs, f"[Sicker Returner: {patient.name} is back, and worse.]", interactive)
+
+    elif event_type == "WALLFLOWER":
+        # The bored loiterer punches a wall and bangs their head (self-harm, Brain). No staff, no other patient.
+        wr = gs.get_room(RoomType.WAITING)
+        candidates = [p for p in wr.queue if p.checked_in and p.wr_turns >= WALLFLOWER_WR_TURNS
+                      and not p.discharged and not p.admitted]
+        patient = random.choice(candidates)
+        add_symptom_card(gs, patient, SymptomType.BRAIN, face_up=False)
+        gs.log.append(f"[Karma] {patient.name} punches a wall in frustration.")  # PLACEHOLDER
+        show_event_screen(gs, f"[Wallflower: {patient.name} punches a wall in frustration.]", interactive)
+
+    elif event_type == "UNCHECKED":
+        # The ignored patient decks a staff member and storms out: walk-out (logged, not a death) + a staff out 2 turns.
+        candidates = [p for p in gs.all_patients if not p.checked_in
+                      and p.arrival_turn is not None and (gs.turn - p.arrival_turn) >= UNCHECKED_AGGRO_TURNS
+                      and not p.discharged and not p.admitted]
+        patient = random.choice(candidates)
+        room = gs.find_patient_room(patient)
+        if room:
+            room.remove_patient(patient)
+        patient.discharged = True          # removed from the system (survivor, not a death)
+        patient.stormed_out = True         # reuse the walk-out flag
+        patient.discharge_turn = gs.turn
+        _make_one_staff_unavailable(gs, turns=2)
+        gs.log.append(f"[Karma] {patient.name} decks a staff member and storms out.")  # PLACEHOLDER
+        show_event_screen(gs, f"[Unchecked Aggression: {patient.name} decks a staff member and storms out.]", interactive)
+
+
 def resolve_end_of_game(gs):
     # Check in all remaining
     for room in gs.rooms.values():
@@ -1225,7 +1565,7 @@ def render_header(gs):
     print()
  
     actions = gs.actions_remaining
-    total_actions = NUM_PLAYERS * ACTIONS_PER_PLAYER
+    total_actions = SHARED_ACTION_POOL
     deaths = count_current_deaths(gs)
     ac = GREEN if actions > total_actions // 2 else (YELLOW if actions > 2 else RED)
     dc = GREEN if deaths == 0 else (YELLOW if deaths <= DEATH_THRESHOLD else RED)
@@ -1321,6 +1661,9 @@ def render_players(gs):
     for p in gs.players:
         c = ROOM_COLORS[p.current_room]
         name = p.role.value if p.role else f"Staff {p.id}"
+        if not player_available(gs, p):
+            print(f"    {DIM}{name}: {p.current_room.value} (off this turn){RESET}")
+            continue
         hint = ""
         if p.role in ACTIVE_ROLES:
             hint = "  [a: ability]"
@@ -1356,7 +1699,8 @@ def render_action_menu(gs, pid):
     if player.current_room == RoomType.WAITING:
         print(f"    {BOLD}d{RESET} - Room action: Check in front patient")
     elif player.current_room in ROOM_TO_SYMPTOM:
-        print(f"    {BOLD}d{RESET} - Room action: Diagnose front patient (up to 2 symptoms)")
+        strain = f" {YELLOW}(resource-strained: 2 actions){RESET}" if _room_strained(gs, player.current_room) else ""
+        print(f"    {BOLD}d{RESET} - Room action: Diagnose front patient (up to 2 symptoms){strain}")
     elif player.current_room == RoomType.ADMITTANCE:
         print(f"    {BOLD}d{RESET} - Room action: Transfer front patient out")
     print(f"    {BOLD}s{RESET} - Send patient to another room / Discharge")
@@ -1441,7 +1785,7 @@ def render_title_screen():
     for line in centre_block([
         f"{DIM}You control {NUM_PLAYERS} staff members working the night shift.{RESET}",
         f"{DIM}Survive until 8:00 AM with no more than {DEATH_THRESHOLD} deaths.{RESET}",
-        f"{DIM}Each turn you have {NUM_PLAYERS * ACTIONS_PER_PLAYER} actions to share between your team.{RESET}",
+        f"{DIM}Each turn you have {SHARED_ACTION_POOL} actions to share between your team.{RESET}",
     ]):
         print(line)
     print()
@@ -1470,7 +1814,7 @@ def render_how_to_play():
         f"Each turn represents 1 hour:",
         f"  1. {YELLOW}Harm tick{RESET} — all patients accumulate damage",
         f"  2. {CYAN}Arrivals{RESET} — new patients enter the Waiting Room",
-        f"  3. {GREEN}Staff actions{RESET} — {NUM_PLAYERS * ACTIONS_PER_PLAYER} actions shared between {NUM_PLAYERS} staff",
+        f"  3. {GREEN}Staff actions{RESET} — {SHARED_ACTION_POOL} actions shared between {NUM_PLAYERS} staff",
         f"  4. {MAGENTA}Room auto-functions{RESET} — rooms process their front patient",
         "",
         f"{BOLD}PLAYER ACTIONS{RESET}",
@@ -1975,7 +2319,7 @@ def create_tutorial_game():
         RoomType.ADMITTANCE: Room(RoomType.ADMITTANCE, capacity=ROOM_CAPACITY),
     }
     gs.players = [Player(id=i + 1) for i in range(NUM_PLAYERS)]
-    gs.actions_remaining = NUM_PLAYERS * ACTIONS_PER_PLAYER  # 12
+    gs.actions_remaining = SHARED_ACTION_POOL  # 12
     gs.patient_deck = []  # Empty — no arrivals during tutorial
     for st in SymptomType:
         gs.symptom_decks[st] = generate_symptom_deck(st)
@@ -2815,7 +3159,13 @@ def run_interactive(seed=None):
         else:
             begin_turn(gs)
             render_full_state(gs)
- 
+
+        # Don't leave an unavailable staff member as the active controller.
+        if not player_available(gs, gs.players[active - 1]):
+            nxt = next((p.id for p in gs.players if player_available(gs, p)), None)
+            if nxt is not None:
+                active = nxt
+
         while gs.actions_remaining > 0:
             render_action_menu(gs, active)
             player = gs.players[active - 1]
@@ -3009,11 +3359,13 @@ def run_interactive(seed=None):
                         print(f"  {DIM}Cancelled.{RESET}")
                     else:
                         pid = int(raw)
-                        if 1 <= pid <= len(gs.players):
+                        if not (1 <= pid <= len(gs.players)):
+                            print(f"  {RED}Invalid staff number.{RESET}")
+                        elif not player_available(gs, gs.players[pid - 1]):
+                            print(f"  {RED}That staff member is off this turn.{RESET}")
+                        else:
                             active = pid
                             print(f"  {GREEN}Now controlling Staff {pid}.{RESET}")
-                        else:
-                            print(f"  {RED}Invalid staff number.{RESET}")
                 except ValueError:
                     print(f"  {RED}Invalid input.{RESET}")
  
@@ -3085,7 +3437,11 @@ def run_interactive(seed=None):
                 print(f"  {YELLOW}{entry}{RESET}")
         print(f"\n  Press Enter to continue to next turn...")
         input()
- 
+
+        # Fag break after end-of-turn 3, 6, 9 (not on the final turn)
+        if turn in FAG_BREAK_AFTER_TURNS and turn < gs.total_turns:
+            run_fag_break(gs, sorted(FAG_BREAK_AFTER_TURNS).index(turn) + 1, interactive=True)
+
         # End-of-game audit sequence (dramatic patient-by-patient tally)
     render_audit_sequence(gs)
     result = resolve_end_of_game(gs)
@@ -3106,7 +3462,9 @@ def get_priority_symptom(patient):
  
 def ai_decide_action(gs, player_idx):
     player = gs.players[player_idx]
- 
+    if not player_available(gs, player):
+        return False
+
     # Priority 1: Discharge / admit fully diagnosed in current room
     room = gs.get_room(player.current_room)
     for pat in list(room.queue):
@@ -3268,6 +3626,9 @@ def run_single_game(seed=None, verbose=False):
                   f"AD={gs.get_room(RoomType.ADMITTANCE).patient_count}")
         ai_play_turn(gs)
         end_turn(gs)
+        # Fag break after end-of-turn 3, 6, 9 (headless: no input() / screens)
+        if turn in FAG_BREAK_AFTER_TURNS and turn < gs.total_turns:
+            run_fag_break(gs, sorted(FAG_BREAK_AFTER_TURNS).index(turn) + 1, interactive=False)
     result = resolve_end_of_game(gs)
     if verbose:
         print(f"  Result: {'WIN' if result['won'] else 'LOSS'} -- {result['death_count']} deaths, "
