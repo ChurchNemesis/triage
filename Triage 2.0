@@ -288,9 +288,12 @@ class Player:
     actions_this_turn: int = 0                      # reset each turn; capped at PER_STAFF_ACTION_CAP
     unavailable_until_turn: Optional[int] = None    # unavailable while gs.turn <= this
     room_turns: int = 0    # consecutive turns spent in the current room without moving
+    removed: bool = False  # permanently removed from game (Sanitiser Spill slip)
 
 
 def player_available(gs, player) -> bool:
+    if player.removed:
+        return False
     return player.unavailable_until_turn is None or gs.turn > player.unavailable_until_turn
 
 
@@ -431,6 +434,9 @@ class GameState:
     used_untriggered: set = field(default_factory=set)          # untriggered events already drawn (no-repeat)
     power_flicker_turn: Optional[int] = None          # auto-functions suppressed on this turn
     resource_strained: dict = field(default_factory=dict)  # RoomType -> turn the strain expires (exclusive)
+    spill_present: bool = False              # Sanitiser Spill hazard active in Waiting Room
+    staff_lost_to_slips: int = 0             # count of staff permanently removed by spill slips
+    all_three_lost: bool = False             # trio carve-out: forced loss condition
 
     @property
     def shift_hour(self) -> str:
@@ -595,12 +601,16 @@ def save_game(gs, active_player_id, slot_name=None):
                       "cpr_used": p.cpr_used,
                       "actions_this_turn": p.actions_this_turn,
                       "unavailable_until_turn": p.unavailable_until_turn,
-                      "room_turns": p.room_turns} for p in gs.players],
+                      "room_turns": p.room_turns,
+                      "removed": p.removed} for p in gs.players],
         "sicker_returner_tokens": [p.id for p in gs.sicker_returner_tokens],
         "disabled_events": sorted(gs.disabled_events),
         "used_untriggered": sorted(gs.used_untriggered),
         "power_flicker_turn": gs.power_flicker_turn,
         "resource_strained": {rt.value: t for rt, t in gs.resource_strained.items()},
+        "spill_present": gs.spill_present,
+        "staff_lost_to_slips": gs.staff_lost_to_slips,
+        "all_three_lost": gs.all_three_lost,
         "all_patients": [_serialize_patient(p) for p in gs.all_patients],
         "patient_deck": [_serialize_patient(p) for p in gs.patient_deck],
         "rooms": room_data,
@@ -642,7 +652,8 @@ def load_game(filepath):
                    cpr_used=pd.get("cpr_used", False),
                    actions_this_turn=pd.get("actions_this_turn", 0),
                    unavailable_until_turn=pd.get("unavailable_until_turn"),
-                   room_turns=pd.get("room_turns", 0))
+                   room_turns=pd.get("room_turns", 0),
+                   removed=pd.get("removed", False))
         gs.players.append(p)
 
     # Restore all_patients (the canonical patient objects)
@@ -688,6 +699,9 @@ def load_game(filepath):
     gs.used_untriggered = set(data.get("used_untriggered", []))
     gs.power_flicker_turn = data.get("power_flicker_turn")
     gs.resource_strained = {RoomType(k): t for k, t in data.get("resource_strained", {}).items()}
+    gs.spill_present = data.get("spill_present", False)
+    gs.staff_lost_to_slips = data.get("staff_lost_to_slips", 0)
+    gs.all_three_lost = data.get("all_three_lost", False)
 
     # Restore random state
     random_state = (3, tuple(data["random_state"]), data["random_pos"])
@@ -913,6 +927,49 @@ def action_rearrange(gs, player, new_order):
     msg = f"Staff {player.id} rearranged {player.current_room.value} queue: {', '.join(p.name for p in new_order)}."
     gs.log.append(msg)
     return msg
+
+
+def action_clean_spill(gs, player):
+    if player.current_room != RoomType.WAITING:
+        raise ActionError("Must be in the Waiting Room to clean the spill.")
+    if not gs.spill_present:
+        raise ActionError("There is no spill to clean.")
+    spend_actions(gs, player, 2)
+    gs.spill_present = False
+    msg = f"Staff {player.id} mopped up the sanitiser spill."
+    gs.log.append(msg)
+    return msg
+
+
+def resolve_spill_slip(gs, interactive=True):
+    if not gs.spill_present:
+        return
+    wr = gs.get_room(RoomType.WAITING)
+    staff_in_wr = [p for p in gs.players if p.current_room == RoomType.WAITING and not p.removed]
+    if not staff_in_wr:
+        return
+    victim = random.choice(staff_in_wr)
+    victim.removed = True
+    gs.staff_lost_to_slips += 1
+    gs.log.append(f"[Spill] Staff {victim.id} ({victim.role.value if victim.role else '?'}) slipped on the sanitiser and is out for good.")  # PLACEHOLDER
+    if interactive:
+        show_event_screen(gs, f"[Spill Slip: Staff {victim.id} slipped and is permanently out!]")
+    remaining = [p for p in gs.players if not p.removed]
+    if len(remaining) == 0:
+        gs.all_three_lost = True
+
+
+def resolve_endgame_spill(gs):
+    if not gs.spill_present:
+        return False
+    remaining = [p for p in gs.players if not p.removed]
+    if gs.staff_lost_to_slips >= 2 and len(remaining) <= 1:
+        wr = gs.get_room(RoomType.WAITING)
+        staff_in_wr = [p for p in remaining if p.current_room == RoomType.WAITING]
+        if staff_in_wr:
+            gs.all_three_lost = True
+            return True
+    return False
 
 
 # ── Active staff abilities (the `a` key) ──
@@ -1297,9 +1354,11 @@ def apply_untriggered_event(gs, ev, break_no, interactive=True):
 def run_fag_break(gs, break_no, interactive=True):
     # 1) Smoke-break monologue — PLACEHOLDER prose (writing tasks §1)
     show_smoke_break_monologue(gs, break_no, interactive=interactive)
-    # 2) Base untriggered event (the base layer) — implemented in 03b
-    draw_and_apply_untriggered_event(gs, break_no, interactive=interactive)   # 03b STUB: no-op for now
-    # 3) Karmic event on top
+    # 2) Spill slip — deterministic if spill present + staff in WR (03c)
+    resolve_spill_slip(gs, interactive=interactive)
+    # 3) Base untriggered event (the base layer) — implemented in 03b
+    draw_and_apply_untriggered_event(gs, break_no, interactive=interactive)
+    # 4) Karmic event on top
     resolve_karmic_event(gs, break_no, interactive=interactive)
 
 
@@ -1320,7 +1379,13 @@ def live_token_counts(gs):
                 and (p.cannot_check_in_until is None or gs.turn >= p.cannot_check_in_until))
         if n:
             counts["UNCHECKED"] = n
-    # SPILL is added here by 03c
+    if "SPILL" not in gs.disabled_events:
+        n = sum(1 for p in gs.all_patients
+                if not p.discharged and not p.admitted and p.checked_in
+                and p.can_discharge(gs.turn)
+                and p in gs.get_room(RoomType.WAITING).queue)
+        if n:
+            counts["SPILL"] = n
     return counts
 
 
@@ -1402,8 +1467,16 @@ def apply_triggered_event(gs, event_type, interactive=True):
         gs.log.append(f"[Karma] {patient.name} decks a staff member and storms out.")  # PLACEHOLDER
         show_event_screen(gs, f"[Unchecked Aggression: {patient.name} decks a staff member and storms out.]", interactive)
 
+    elif event_type == "SPILL":
+        gs.spill_present = True
+        gs.log.append("[Karma] Someone knocked the sanitiser — the Waiting Room floor is a hazard.")  # PLACEHOLDER
+        show_event_screen(gs, "[Sanitiser Spill: the Waiting Room floor is a slippery hazard!]", interactive)
+
 
 def resolve_end_of_game(gs):
+    # Endgame spill check (trio carve-out: 2 lost + spill + last staffer in WR → forced loss)
+    resolve_endgame_spill(gs)
+
     # Check in all remaining
     for room in gs.rooms.values():
         for patient in room.queue:
@@ -1435,11 +1508,13 @@ def resolve_end_of_game(gs):
             deaths.append(patient)
         else:
             survivors.append(patient)
+    won = len(deaths) <= DEATH_THRESHOLD and not gs.all_three_lost
     return {
         "deaths": deaths,
         "death_count": len(deaths),
         "survivors": survivors,
-        "won": len(deaths) <= DEATH_THRESHOLD,
+        "won": won,
+        "all_three_lost": gs.all_three_lost,
         "total_patients": len(gs.all_patients),
         "discharged": sum(1 for p in gs.all_patients if p.discharged),
         "admitted": sum(1 for p in gs.all_patients if p.admitted),
@@ -1630,9 +1705,11 @@ def render_room(gs, rt, detail=True):
     room = gs.get_room(rt)
     c = ROOM_COLORS[rt]
     cap = f"/{room.capacity}" if room.capacity else ""
-    pstrs = [f"P{p.id}" for p in gs.players if p.current_room == rt]
+    pstrs = [f"P{p.id}" for p in gs.players if p.current_room == rt and not p.removed]
     ph = f" [{', '.join(pstrs)}]" if pstrs else ""
     print(f"  {c}{BOLD}{rt.value}{RESET} ({room.patient_count}{cap}){ph}")
+    if rt == RoomType.WAITING and gs.spill_present:
+        print(f"    {BG_RED}{WHITE}{BOLD} ⚠ SANITISER SPILL — HAZARD ⚠ {RESET}  {YELLOW}(c to clean, 2 actions){RESET}")
     if not room.queue:
         print(f"    {DIM}(empty){RESET}")
         return
@@ -1661,6 +1738,9 @@ def render_players(gs):
     for p in gs.players:
         c = ROOM_COLORS[p.current_room]
         name = p.role.value if p.role else f"Staff {p.id}"
+        if p.removed:
+            print(f"    {DIM}{name}: {RED}GONE{RESET}{DIM} (slipped on sanitiser){RESET}")
+            continue
         if not player_available(gs, p):
             print(f"    {DIM}{name}: {p.current_room.value} (off this turn){RESET}")
             continue
@@ -1704,6 +1784,8 @@ def render_action_menu(gs, pid):
     elif player.current_room == RoomType.ADMITTANCE:
         print(f"    {BOLD}d{RESET} - Room action: Transfer front patient out")
     print(f"    {BOLD}s{RESET} - Send patient to another room / Discharge")
+    if gs.spill_present and player.current_room == RoomType.WAITING:
+        print(f"    {BOLD}c{RESET} - Clean sanitiser spill (2 actions)")
     if player.role in ACTIVE_ROLES:
         print(f"    {BOLD}a{RESET} - Use ability ({player.role.value})")
     print(f"    {BOLD}k{RESET} - Call patient to this room")
@@ -2114,7 +2196,14 @@ def render_end_of_game(gs, result):
         print(f"{BOLD}  GAME OVER{RESET}")
         print(f"{CYAN}{'=' * 60}{RESET}")
         print()
- 
+
+        if result.get("all_three_lost"):
+            print(f"  {BG_RED}{WHITE}{BOLD} ALL STAFF LOST {RESET}")
+            print()
+            print(f"  {RED}The sanitiser spill claimed your entire team.{RESET}")
+            print(f"  {RED}There is no one left to treat the patients.{RESET}")
+            print()
+
         # Family letter — about the last patient who died during the game
         in_game_dead = [p for p in result['deaths'] if p.death_turn is not None]
         if in_game_dead:
@@ -3252,6 +3341,14 @@ def run_interactive(seed=None):
                         else:
                             print(f"  {DIM}Cancelled.{RESET}")
 
+            elif choice == "c":
+                try:
+                    msg = action_clean_spill(gs, player)
+                    print(f"  {GREEN}{msg}{RESET}")
+                    action_taken = True
+                except ActionError as e:
+                    print(f"  {RED}{e}{RESET}")
+
             elif choice == "a":
                 if player.role not in ACTIVE_ROLES:
                     print(f"  {RED}This staff member has no active ability.{RESET}")
@@ -3423,7 +3520,7 @@ def run_interactive(seed=None):
                     print("  Game abandoned.")
                     return
             else:
-                print(f"  {RED}Unknown action. Use m/d/s/k/r/p/e/x/i/v/q.{RESET}")
+                print(f"  {RED}Unknown action. Use m/d/s/c/k/r/p/e/x/i/v/q.{RESET}")
  
             if action_taken:
                 render_full_state(gs)
